@@ -18,6 +18,7 @@ async function main() {
   }
 
   const tweetId = tweetIdMatch[1];
+  await resetE2eState();
   const server = startServer();
   try {
     await waitForHealth();
@@ -37,6 +38,11 @@ async function main() {
   } finally {
     server.kill("SIGTERM");
   }
+}
+
+async function resetE2eState() {
+  await fsp.rm(path.join(ROOT, "XArchive_e2e"), { recursive: true, force: true });
+  await fsp.rm(path.join(ROOT, "data_e2e"), { recursive: true, force: true });
 }
 
 function startServer() {

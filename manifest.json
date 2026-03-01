@@ -11,6 +11,7 @@
     "webRequest"
   ],
   "host_permissions": [
+    "<all_urls>",
     "https://x.com/*",
     "https://twitter.com/*",
     "http://127.0.0.1:18765/*",
