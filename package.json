@@ -1,0 +1,24 @@
+{
+  "name": "x-post",
+  "version": "1.0.0",
+  "description": "設計確定内容に合わせた初期実装です。",
+  "main": "content.js",
+  "scripts": {
+    "test:e2e:save-post": "node scripts/playwright-save-post-e2e.cjs"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Wataru199410/XpostArchiveTool.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Wataru199410/XpostArchiveTool/issues"
+  },
+  "homepage": "https://github.com/Wataru199410/XpostArchiveTool#readme",
+  "devDependencies": {
+    "playwright": "^1.58.2"
+  }
+}

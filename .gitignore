@@ -4,3 +4,6 @@ server/data/
 server/XArchive/
 .vscode/
 .DS_Store
+node_modules/
+XArchive_e2e/
+data_e2e/
