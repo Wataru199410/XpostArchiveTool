@@ -1,2 +1,3 @@
-# XpostArchiveTool
-ツイッターの保存ツール
+﻿# XpostArchiveTool
+
+X ポストをローカルに保存するためのツールです。

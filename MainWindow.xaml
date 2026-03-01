@@ -1,0 +1,29 @@
+<Window x:Class="XPostArchive.Desktop.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="X Post Archive" Height="640" Width="1024" MinWidth="960" MinHeight="600">
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <StackPanel Orientation="Horizontal" Grid.Row="0" Margin="0,0,0,12">
+            <TextBlock Text="API状態:" VerticalAlignment="Center" FontWeight="Bold"/>
+            <TextBlock x:Name="ApiStatusText" Text="未接続" Margin="8,0,0,0" VerticalAlignment="Center"/>
+            <Button Content="再確認" Width="90" Margin="16,0,0,0" Click="HealthCheck_Click"/>
+        </StackPanel>
+
+        <TextBox Grid.Row="1" x:Name="SearchBox" Height="32" Margin="0,0,0,12" VerticalContentAlignment="Center" Text="(次フェーズ) text + note 検索" IsReadOnly="True"/>
+
+        <DataGrid Grid.Row="2" x:Name="PostsGrid" AutoGenerateColumns="False" IsReadOnly="True">
+            <DataGrid.Columns>
+                <DataGridTextColumn Header="保存日時" Binding="{Binding SavedAt}" Width="200"/>
+                <DataGridTextColumn Header="投稿者" Binding="{Binding Author}" Width="160"/>
+                <DataGridTextColumn Header="本文" Binding="{Binding Text}" Width="*"/>
+                <DataGridTextColumn Header="タグ" Binding="{Binding Tags}" Width="200"/>
+            </DataGrid.Columns>
+        </DataGrid>
+    </Grid>
+</Window>

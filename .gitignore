@@ -1,0 +1,6 @@
+**/bin/
+**/obj/
+server/data/
+server/XArchive/
+.vscode/
+.DS_Store
