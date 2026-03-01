@@ -11,7 +11,7 @@ AppPublisher={#MyAppPublisher}
 DefaultDirName={autopf}\XPostArchive
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
-OutputDir=..\dist\installer
+OutputDir=dist\installer
 OutputBaseFilename=XPostArchive-Setup
 Compression=lzma
 SolidCompression=yes
@@ -27,9 +27,11 @@ Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "desktopicon"; Description: "デスクトップにショートカットを作成する"; GroupDescription: "追加タスク:"; Flags: unchecked
 
 [Files]
-Source: "..\dist\publish\desktop\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
-Source: "..\dist\publish\server\*"; DestDir: "{app}\server"; Flags: recursesubdirs ignoreversion
-Source: "..\extension\*"; DestDir: "{app}\extension"; Flags: recursesubdirs ignoreversion
+Source: "dist\publish\desktop\*"; DestDir: "{app}"; Flags: recursesubdirs ignoreversion
+Source: "dist\publish\server\*"; DestDir: "{app}\server"; Flags: recursesubdirs ignoreversion
+Source: "manifest.json"; DestDir: "{app}\extension"; Flags: ignoreversion
+Source: "content.js"; DestDir: "{app}\extension"; Flags: ignoreversion
+Source: "service_worker.js"; DestDir: "{app}\extension"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

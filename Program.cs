@@ -134,7 +134,7 @@ app.MapPost("/api/v1/posts", async (
             downloadedVideos.Add(new MediaRow("video", m3u8Url, rel.Replace('\\', '/'), i));
         }
 
-        await using var tx = await conn.BeginTransactionAsync(ct);
+        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
 
         var authorId = await Db.UpsertAuthorAsync(conn, tx, request.author.handle, request.author.name, savedAt, ct);
         var postId = await Db.InsertPostAsync(conn, tx, request, authorId, createdAt, savedAt, postDir, ct);

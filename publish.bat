@@ -1,9 +1,9 @@
 @echo off
 setlocal
 
-set ROOT=%~dp0..
-set OUT=%ROOT%\dist\publish
-set FFMPEG_SRC=%ROOT%\third_party\ffmpeg\ffmpeg.exe
+set "ROOT=%~dp0"
+set "OUT=%ROOT%dist\publish"
+set "FFMPEG_SRC=%ROOT%third_party\ffmpeg\ffmpeg.exe"
 set FFMPEG_DST_DIR=%OUT%\server\tools
 
 if exist "%OUT%" rmdir /s /q "%OUT%"
@@ -17,11 +17,11 @@ if not exist "%FFMPEG_SRC%" (
 )
 
 echo [1/2] Desktop publish...
-dotnet publish "%ROOT%\desktop\XPostArchive.Desktop.csproj" -c Release -r win-x64 -p:PublishSingleFile=true -p:SelfContained=true -o "%OUT%\desktop"
+dotnet publish "%ROOT%XPostArchive.Desktop.csproj" -c Release -r win-x64 -p:PublishSingleFile=true -p:SelfContained=true -o "%OUT%\desktop"
 if errorlevel 1 goto :error
 
 echo [2/2] Server publish...
-dotnet publish "%ROOT%\server\XPostArchive.Api.csproj" -c Release -r win-x64 -p:PublishSingleFile=true -p:SelfContained=true -o "%OUT%\server"
+dotnet publish "%ROOT%XPostArchive.Api.csproj" -c Release -r win-x64 -p:PublishSingleFile=true -p:SelfContained=true -o "%OUT%\server"
 if errorlevel 1 goto :error
 
 mkdir "%FFMPEG_DST_DIR%"
