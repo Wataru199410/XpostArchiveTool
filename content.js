@@ -1,4 +1,4 @@
-const BUTTON_ID = "x-post-archive-save-button";
+﻿const BUTTON_ID = "x-post-archive-save-button";
 const MODAL_ID = "x-post-archive-modal";
 
 boot();
@@ -8,7 +8,7 @@ function boot() {
 
   const button = document.createElement("button");
   button.id = BUTTON_ID;
-  button.textContent = "このポストを保存";
+  button.textContent = "投稿を保存";
   Object.assign(button.style, {
     position: "fixed",
     right: "16px",
@@ -29,28 +29,26 @@ function boot() {
 
 async function onSaveClick() {
   try {
-    const payload = extractPostData();
+    const payload = await extractPostData();
     const result = await chrome.runtime.sendMessage({ type: "SAVE_POST", payload });
 
     if (!result?.ok) {
       const body = result?.body || {};
-      const canRetry = body.can_retry === true;
       const detail = buildErrorDetail(result, payload);
 
-      if (canRetry) {
+      if (body.can_retry === true) {
         const retry = await showConfirmDialog(
           "保存に失敗しました",
-          `${body.message || "不明なエラー"}\n\n再試行しますか？`,
+          `${body.message || "リクエストに失敗しました。"}\n\n再試行しますか？`,
           detail
         );
         if (retry) {
           const retryResult = await chrome.runtime.sendMessage({ type: "SAVE_POST", payload });
           if (!retryResult?.ok) {
-            await showResultDialog("再試行でも失敗しました", buildErrorDetail(retryResult, payload), true);
+            await showResultDialog("再試行に失敗しました", buildErrorDetail(retryResult, payload), true);
             return;
           }
-
-          await showResultDialog("保存に成功しました", JSON.stringify(retryResult.body || {}, null, 2), false);
+          await showResultDialog("保存しました", JSON.stringify(retryResult.body || {}, null, 2), false);
           return;
         }
       }
@@ -59,38 +57,38 @@ async function onSaveClick() {
       return;
     }
 
-    await showResultDialog("保存に成功しました", JSON.stringify(result.body || {}, null, 2), false);
+    await showResultDialog("保存しました", JSON.stringify(result.body || {}, null, 2), false);
   } catch (error) {
     const detail = `Unhandled Error\n\n${String(error)}\n\n${error?.stack || ""}`;
-    await showResultDialog("保存処理で例外が発生しました", detail, true);
+    await showResultDialog("予期しないエラー", detail, true);
   }
 }
 
-function extractPostData() {
+async function extractPostData() {
   const url = location.href;
-  const tweetMatch = url.match(/status\/(\d+)/);
-  if (!tweetMatch) {
-    throw new Error("tweet_id を URL から取得できませんでした。");
+  const tweetId = resolveTweetId(url);
+  if (!tweetId) {
+    throw new Error("URL から tweet_id を取得できませんでした。");
   }
 
-  const article = document.querySelector("article[data-testid='tweet']") || document.querySelector("article");
+  const article = await waitForTargetArticle(tweetId, 8000);
   if (!article) {
-    throw new Error("投稿DOMを取得できませんでした。");
+    throw new Error("投稿の DOM を特定できませんでした。");
   }
 
   const timeEl = article.querySelector("time");
   const createdAt = timeEl?.getAttribute("datetime") || "";
   if (!createdAt) {
-    throw new Error("created_at を取得できませんでした。");
+    throw new Error("created_at が見つかりませんでした。");
   }
 
   const textEl = article.querySelector("div[data-testid='tweetText']");
   const text = textEl?.innerText?.trim() || "";
   if (!text) {
-    throw new Error("本文を取得できませんでした。");
+    throw new Error("投稿本文が見つかりませんでした。");
   }
 
-  const handleEl = article.querySelector("a[href*='/status/']");
+  const handleEl = article.querySelector(`a[href*="/status/${tweetId}"]`) || article.querySelector("a[href*='/status/']");
   const handle = resolveHandle(handleEl?.getAttribute("href"));
   const nameEl = article.querySelector("div[dir='ltr'] span");
   const authorName = nameEl?.textContent?.trim() || handle;
@@ -102,7 +100,7 @@ function extractPostData() {
     .slice(0, 10);
 
   return {
-    tweet_id: tweetMatch[1],
+    tweet_id: tweetId,
     url,
     author: {
       handle,
@@ -114,6 +112,30 @@ function extractPostData() {
     note: "",
     images: imageUrls
   };
+}
+
+function resolveTweetId(url) {
+  const match = url.match(/status\/(\d+)/);
+  return match ? match[1] : "";
+}
+
+async function waitForTargetArticle(tweetId, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const article = findTargetArticle(tweetId);
+    if (article) return article;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+  }
+  return null;
+}
+
+function findTargetArticle(tweetId) {
+  const links = [...document.querySelectorAll(`a[href*="/status/${tweetId}"]`)];
+  for (const link of links) {
+    const article = link.closest("article");
+    if (article) return article;
+  }
+  return document.querySelector("article[data-testid='tweet']") || document.querySelector("article");
 }
 
 function resolveHandle(href) {
@@ -137,12 +159,10 @@ function buildErrorDetail(result, payload) {
 }
 
 async function showResultDialog(title, detailText, isError) {
-  const { root, body, okButton, copyButton } = createModal(title, detailText, isError, false);
-
+  const { root, okButton, copyButton } = createModal(title, detailText, isError, false);
   copyButton.addEventListener("click", async () => {
     await copyText(detailText);
   });
-
   await waitButton(okButton);
   root.remove();
 }
@@ -151,6 +171,7 @@ async function showConfirmDialog(title, message, detailText) {
   const { root, body, okButton, cancelButton, copyButton } = createModal(title, detailText, true, true);
   const messageNode = document.createElement("div");
   messageNode.textContent = message;
+  messageNode.style.whiteSpace = "pre-wrap";
   messageNode.style.marginBottom = "10px";
   body.prepend(messageNode);
 
@@ -184,21 +205,33 @@ function createModal(title, detailText, isError, withCancel) {
   Object.assign(panel.style, {
     width: "min(760px, 100%)",
     maxHeight: "90vh",
-    overflow: "auto",
     background: "#fff",
     color: "#111",
     borderRadius: "12px",
-    padding: "16px",
     fontFamily: "ui-sans-serif, system-ui, -apple-system, Segoe UI, sans-serif",
-    boxShadow: "0 10px 30px rgba(0,0,0,0.25)"
+    boxShadow: "0 10px 30px rgba(0,0,0,0.25)",
+    display: "flex",
+    flexDirection: "column",
+    overflow: "hidden"
+  });
+
+  const header = document.createElement("div");
+  Object.assign(header.style, {
+    padding: "16px 16px 8px 16px"
   });
 
   const heading = document.createElement("h3");
   heading.textContent = title;
-  heading.style.margin = "0 0 10px 0";
+  heading.style.margin = "0";
   heading.style.color = isError ? "#b42318" : "#0f5132";
+  header.appendChild(heading);
 
   const body = document.createElement("div");
+  Object.assign(body.style, {
+    padding: "8px 16px",
+    overflow: "auto",
+    flex: "1 1 auto"
+  });
 
   const detail = document.createElement("textarea");
   detail.readOnly = true;
@@ -216,27 +249,29 @@ function createModal(title, detailText, isError, withCancel) {
     borderRadius: "8px",
     padding: "8px"
   });
+  body.appendChild(detail);
 
-  const actions = document.createElement("div");
-  Object.assign(actions.style, {
+  const footer = document.createElement("div");
+  Object.assign(footer.style, {
     display: "flex",
     justifyContent: "flex-end",
     gap: "8px",
-    marginTop: "12px"
+    padding: "12px 16px 16px 16px",
+    borderTop: "1px solid #eaecf0",
+    flex: "0 0 auto"
   });
 
   const copyButton = createButton("コピー", "#e4e7ec", "#111");
-  const okButton = createButton(withCancel ? "再試行する" : "OK", "#1d4ed8", "#fff");
-  const cancelButton = withCancel ? createButton("閉じる", "#e4e7ec", "#111") : null;
+  const okButton = createButton(withCancel ? "再試行" : "OK", "#1d4ed8", "#fff");
+  const cancelButton = withCancel ? createButton("キャンセル", "#e4e7ec", "#111") : null;
 
-  body.appendChild(detail);
-  actions.appendChild(copyButton);
-  if (cancelButton) actions.appendChild(cancelButton);
-  actions.appendChild(okButton);
+  footer.appendChild(copyButton);
+  if (cancelButton) footer.appendChild(cancelButton);
+  footer.appendChild(okButton);
 
-  panel.appendChild(heading);
+  panel.appendChild(header);
   panel.appendChild(body);
-  panel.appendChild(actions);
+  panel.appendChild(footer);
   root.appendChild(panel);
   document.body.appendChild(root);
 
@@ -279,6 +314,6 @@ async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
   } catch {
-    window.prompt("コピーできないため手動でコピーしてください", text);
+    window.prompt("コピーに失敗しました。手動でコピーしてください:", text);
   }
 }

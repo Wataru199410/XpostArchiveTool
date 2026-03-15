@@ -4,7 +4,9 @@
   "description": "設計確定内容に合わせた初期実装です。",
   "main": "content.js",
   "scripts": {
-    "test:e2e:save-post": "node scripts/playwright-save-post-e2e.cjs"
+    "test:e2e:save-post": "node scripts/playwright-save-post-e2e.cjs",
+    "test:e2e:copy-error": "node scripts/playwright-copy-error-e2e.cjs",
+    "test:manual:playwright": "node scripts/playwright-manual-check.cjs"
   },
   "repository": {
     "type": "git",

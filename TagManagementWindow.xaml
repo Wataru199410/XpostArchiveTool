@@ -1,0 +1,129 @@
+<Window x:Class="XPostArchive.Desktop.TagManagementWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="タグ管理"
+        Width="680"
+        Height="640"
+        MinWidth="560"
+        MinHeight="520"
+        WindowStartupLocation="CenterOwner"
+        Background="#F3F4F8">
+    <Window.Resources>
+        <SolidColorBrush x:Key="Surface" Color="#FFFFFF"/>
+        <SolidColorBrush x:Key="MutedSurface" Color="#F8FAFC"/>
+        <SolidColorBrush x:Key="Border" Color="#E5E7EB"/>
+        <SolidColorBrush x:Key="TextMain" Color="#111827"/>
+        <SolidColorBrush x:Key="TextSub" Color="#6B7280"/>
+        <SolidColorBrush x:Key="Primary" Color="#0096FA"/>
+
+        <Style x:Key="CardBorder" TargetType="Border">
+            <Setter Property="Background" Value="{StaticResource Surface}"/>
+            <Setter Property="BorderBrush" Value="{StaticResource Border}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="CornerRadius" Value="14"/>
+            <Setter Property="Padding" Value="16"/>
+        </Style>
+
+        <Style x:Key="PrimaryButton" TargetType="Button">
+            <Setter Property="Background" Value="{StaticResource Primary}"/>
+            <Setter Property="Foreground" Value="White"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="12,8"/>
+            <Setter Property="FontWeight" Value="SemiBold"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="10">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="16">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Style="{StaticResource CardBorder}">
+            <StackPanel>
+                <TextBlock Text="タグ管理" FontSize="24" FontWeight="Bold" Foreground="{StaticResource TextMain}"/>
+                <TextBlock Text="未使用のタグも含めて一覧表示し、新規追加と削除ができます。"
+                           Margin="0,6,0,0"
+                           Foreground="{StaticResource TextSub}"/>
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="1" Style="{StaticResource CardBorder}" Margin="0,12,0,12">
+            <StackPanel>
+                <TextBlock Text="新規タグ追加" FontWeight="Bold" Foreground="{StaticResource TextMain}"/>
+                <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                    <TextBox x:Name="NewTagTextBox"
+                             Width="320"
+                             Height="34"
+                             Padding="10,0"
+                             VerticalContentAlignment="Center"
+                             GotKeyboardFocus="NewTagTextBox_GotKeyboardFocus"
+                             InputMethod.IsInputMethodEnabled="True"
+                             InputMethod.PreferredImeState="On"
+                             Language="ja-JP"/>
+                    <Button Content="追加"
+                            Width="88"
+                            Margin="10,0,0,0"
+                            Style="{StaticResource PrimaryButton}"
+                            Click="AddTag_Click"/>
+                </StackPanel>
+                <TextBlock x:Name="StatusText"
+                           Margin="0,10,0,0"
+                           Foreground="{StaticResource TextSub}"/>
+            </StackPanel>
+        </Border>
+
+        <Border Grid.Row="2" Style="{StaticResource CardBorder}">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="*"/>
+                </Grid.RowDefinitions>
+
+                <TextBlock Grid.Row="0" Text="タグ一覧" FontWeight="Bold" Foreground="{StaticResource TextMain}"/>
+
+                <ListBox x:Name="TagListBox"
+                         Grid.Row="1"
+                         Margin="0,12,0,0"
+                         BorderThickness="0"
+                         Background="Transparent">
+                    <ListBox.ItemTemplate>
+                        <DataTemplate>
+                            <Border Background="{StaticResource MutedSurface}" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="10" Padding="12" Margin="0,0,0,8">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <StackPanel>
+                                        <TextBlock Text="{Binding Name}" FontWeight="SemiBold" Foreground="{StaticResource TextMain}"/>
+                                        <TextBlock Text="{Binding Display}" Margin="0,4,0,0" Foreground="{StaticResource TextSub}"/>
+                                    </StackPanel>
+
+                                    <Button Grid.Column="1"
+                                            Content="削除"
+                                            Width="72"
+                                            Margin="12,0,0,0"
+                                            Tag="{Binding Name}"
+                                            Click="DeleteTag_Click"/>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ListBox.ItemTemplate>
+                </ListBox>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

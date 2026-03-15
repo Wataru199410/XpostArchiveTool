@@ -16,13 +16,13 @@ internal sealed class LocalApiManager : IDisposable
     {
         if (await IsHealthyAsync(ct))
         {
-            return (true, "稼働中");
+            return (true, "API は起動済みです。");
         }
 
         var exePath = ResolveServerExePath();
         if (!File.Exists(exePath))
         {
-            return (false, $"API実行ファイルが見つかりません: {exePath}");
+            return (false, $"API 実行ファイルが見つかりません: {exePath}");
         }
 
         try
@@ -37,7 +37,7 @@ internal sealed class LocalApiManager : IDisposable
         }
         catch (Exception ex)
         {
-            return (false, $"API起動に失敗しました: {ex.Message}");
+            return (false, $"API の起動に失敗しました: {ex.Message}");
         }
 
         for (var i = 0; i < 15; i++)
@@ -46,11 +46,11 @@ internal sealed class LocalApiManager : IDisposable
             await Task.Delay(400, ct);
             if (await IsHealthyAsync(ct))
             {
-                return (true, "稼働中");
+                return (true, "API は正常に起動しました。");
             }
         }
 
-        return (false, "API起動後もヘルスチェックに失敗しました。ポート競合や設定を確認してください。");
+        return (false, "API は起動しましたが、ヘルスチェックに失敗しました。ポート競合や設定を確認してください。");
     }
 
     public async Task<bool> IsHealthyAsync(CancellationToken ct = default)

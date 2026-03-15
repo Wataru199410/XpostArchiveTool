@@ -12,9 +12,11 @@
   <ItemGroup>
     <Compile Remove="App.xaml.cs" />
     <Compile Remove="MainWindow.xaml.cs" />
+    <Compile Remove="PostDetailWindow.xaml.cs" />
     <Compile Remove="LocalApiManager.cs" />
     <None Remove="App.xaml" />
     <None Remove="MainWindow.xaml" />
+    <None Remove="PostDetailWindow.xaml" />
   </ItemGroup>
 
   <ItemGroup>

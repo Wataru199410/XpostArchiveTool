@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "X Post Saver Local",
+  "name": "X 投稿ローカル保存",
   "version": "0.1.0",
-  "description": "閲覧中のXポストをローカルアプリへ保存",
+  "description": "表示中の X 投稿をローカルへ保存します。",
   "permissions": [
     "storage",
     "tabs",

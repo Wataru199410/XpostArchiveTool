@@ -1,27 +1,40 @@
 const fs = require("fs");
 const fsp = require("fs/promises");
+const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { chromium } = require("playwright");
 
 const ROOT = process.cwd();
-const PORT = 18766;
+const PORT = Number(process.env.E2E_API_PORT || (19000 + Math.floor(Math.random() * 1000)));
 const API_BASE = `http://127.0.0.1:${PORT}/api/v1`;
+const RUN_ID = new Date().toISOString().replace(/[:.]/g, "-");
+const STORAGE_ROOT = `./XArchive_e2e/${RUN_ID}`;
+const DATABASE_PATH = `./data_e2e/${RUN_ID}/archive.db`;
+const TOKEN_PATH = `./data_e2e/${RUN_ID}/auth_token.txt`;
 const TWEET_URL =
   process.env.TWEET_URL ||
   "https://x.com/Interior/status/463440424141459456";
+const CHROME_USER_DATA_DIR = process.env.PLAYWRIGHT_CHROME_USER_DATA_DIR;
+const CHROME_PROFILE_DIRECTORY = process.env.PLAYWRIGHT_CHROME_PROFILE_DIRECTORY || "Default";
+const HEADLESS = process.env.PLAYWRIGHT_HEADLESS === "1";
 
 async function main() {
+  if (!CHROME_USER_DATA_DIR) {
+    throw new Error(
+      "PLAYWRIGHT_CHROME_USER_DATA_DIR is required. Point it to your logged-in Chrome user data directory."
+    );
+  }
+
   const tweetIdMatch = TWEET_URL.match(/status\/(\d+)/);
   if (!tweetIdMatch) {
     throw new Error(`Invalid tweet url: ${TWEET_URL}`);
   }
 
   const tweetId = tweetIdMatch[1];
-  await resetE2eState();
   const server = startServer();
   try {
-    await waitForHealth();
+    await waitForHealth(server);
 
     const postData = await collectPostDataWithPlaywright(TWEET_URL, tweetId);
     const token = await bootstrapToken();
@@ -40,19 +53,14 @@ async function main() {
   }
 }
 
-async function resetE2eState() {
-  await fsp.rm(path.join(ROOT, "XArchive_e2e"), { recursive: true, force: true });
-  await fsp.rm(path.join(ROOT, "data_e2e"), { recursive: true, force: true });
-}
-
 function startServer() {
   const env = {
     ...process.env,
     Server__Host: "127.0.0.1",
     Server__Port: String(PORT),
-    Storage__RootPath: "./XArchive_e2e",
-    Database__Path: "./data_e2e/archive.db",
-    Auth__TokenFilePath: "./data_e2e/auth_token.txt",
+    Storage__RootPath: STORAGE_ROOT,
+    Database__Path: DATABASE_PATH,
+    Auth__TokenFilePath: TOKEN_PATH,
     Video__FfmpegPath: "./third_party/ffmpeg/ffmpeg.exe",
     DOTNET_CLI_TELEMETRY_OPTOUT: "1",
     DOTNET_NOLOGO: "1"
@@ -74,11 +82,14 @@ function startServer() {
   return child;
 }
 
-async function waitForHealth() {
+async function waitForHealth(server) {
   const timeoutMs = 60_000;
   const start = Date.now();
 
   while (Date.now() - start < timeoutMs) {
+    if (server.exitCode !== null) {
+      throw new Error(`API process exited early with code ${server.exitCode}`);
+    }
     try {
       const response = await fetch(`${API_BASE}/health`);
       if (response.ok) return;
@@ -92,15 +103,29 @@ async function waitForHealth() {
 }
 
 async function collectPostDataWithPlaywright(url, tweetId) {
-  const browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 1800 }
+  const preparedUserDataDir = await prepareUserDataSnapshot(
+    CHROME_USER_DATA_DIR,
+    CHROME_PROFILE_DIRECTORY
+  );
+  const context = await chromium.launchPersistentContext(preparedUserDataDir, {
+    channel: "chrome",
+    headless: HEADLESS,
+    viewport: null,
+    args: [
+      `--profile-directory=${CHROME_PROFILE_DIRECTORY}`,
+      "--start-maximized"
+    ]
   });
-  const page = await context.newPage();
+  const page = context.pages()[0] || (await context.newPage());
 
   try {
+    await ensureLoggedIn(page);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 120_000 });
     await page.waitForTimeout(4000);
+
+    if (page.url().includes("/i/flow/login")) {
+      throw new Error("Not logged in on x.com. Test requires a logged-in profile.");
+    }
 
     const data = await page.evaluate(({ tweetId: idFromUrl }) => {
       const article =
@@ -151,7 +176,65 @@ async function collectPostDataWithPlaywright(url, tweetId) {
     return data;
   } finally {
     await context.close();
-    await browser.close();
+    await fsp.rm(preparedUserDataDir, { recursive: true, force: true });
+  }
+}
+
+async function prepareUserDataSnapshot(sourceUserDataDir, profileDir) {
+  const snapshotRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "xpost-chrome-profile-"));
+  const sourceProfile = path.join(sourceUserDataDir, profileDir);
+  const targetProfile = path.join(snapshotRoot, profileDir);
+
+  await copyIfExists(path.join(sourceUserDataDir, "Local State"), path.join(snapshotRoot, "Local State"));
+  await copyDirBestEffort(sourceProfile, targetProfile);
+  return snapshotRoot;
+}
+
+async function copyIfExists(src, dst) {
+  try {
+    await fsp.mkdir(path.dirname(dst), { recursive: true });
+    await fsp.copyFile(src, dst);
+  } catch {
+    // best effort
+  }
+}
+
+async function copyDirBestEffort(srcDir, dstDir) {
+  await fsp.mkdir(dstDir, { recursive: true });
+  let entries = [];
+  try {
+    entries = await fsp.readdir(srcDir, { withFileTypes: true });
+  } catch (err) {
+    throw new Error(`Cannot read Chrome profile directory: ${srcDir}. ${err.message}`);
+  }
+
+  for (const entry of entries) {
+    const src = path.join(srcDir, entry.name);
+    const dst = path.join(dstDir, entry.name);
+
+    if (entry.isDirectory()) {
+      await copyDirBestEffort(src, dst);
+      continue;
+    }
+
+    try {
+      await fsp.copyFile(src, dst);
+    } catch {
+      // locked files are skipped
+    }
+  }
+}
+
+async function ensureLoggedIn(page) {
+  await page.goto("https://x.com/home", { waitUntil: "domcontentloaded", timeout: 120_000 });
+  await page.waitForTimeout(3000);
+  const currentUrl = page.url();
+  if (currentUrl.includes("/i/flow/login") || currentUrl.includes("/i/flow/signup")) {
+    throw new Error(
+      "x.com is not logged in for this Chrome profile.\n" +
+        "Please login in normal Chrome first, then re-run this test with the same profile.\n" +
+        `Current URL: ${currentUrl}`
+    );
   }
 }
 

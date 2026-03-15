@@ -8,6 +8,10 @@ using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 
 var builder = WebApplication.CreateBuilder(args);
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.Limits.MaxRequestBodySize = 50 * 1024 * 1024; // 50 MB
+});
 
 var appConfig = AppConfig.From(builder.Configuration);
 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(appConfig.DatabasePath))!);
