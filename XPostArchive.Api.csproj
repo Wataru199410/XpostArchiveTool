@@ -13,10 +13,15 @@
     <Compile Remove="App.xaml.cs" />
     <Compile Remove="MainWindow.xaml.cs" />
     <Compile Remove="PostDetailWindow.xaml.cs" />
+    <Compile Remove="TagEditWindow.xaml.cs" />
+    <Compile Remove="TagManagementWindow.xaml.cs" />
+    <Compile Remove="TagCatalogStore.cs" />
     <Compile Remove="LocalApiManager.cs" />
     <None Remove="App.xaml" />
     <None Remove="MainWindow.xaml" />
     <None Remove="PostDetailWindow.xaml" />
+    <None Remove="TagEditWindow.xaml" />
+    <None Remove="TagManagementWindow.xaml" />
   </ItemGroup>
 
   <ItemGroup>

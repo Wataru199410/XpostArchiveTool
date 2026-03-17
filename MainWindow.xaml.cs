@@ -4,7 +4,6 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -15,31 +14,27 @@ namespace XPostArchive.Desktop;
 public partial class MainWindow : Window
 {
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
-    private static readonly Regex AllowedTagPattern = new(
-        @"^[A-Za-z0-9\uFF10-\uFF19\uFF21-\uFF3A\uFF41-\uFF5A\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF ]+$",
-        RegexOptions.Compiled);
     private static readonly Brush ErrorBrush = new SolidColorBrush(Color.FromRgb(180, 35, 24));
     private static readonly Brush NeutralBrush = new SolidColorBrush(Color.FromRgb(107, 114, 128));
     private static readonly Brush SuccessBrush = new SolidColorBrush(Color.FromRgb(22, 101, 52));
-    private static readonly Brush DisabledBrush = new SolidColorBrush(Color.FromRgb(156, 163, 175));
 
     private List<PostListItem> _allItems = new();
     private List<TagCatalogItem> _tagCatalog = new();
     private readonly List<EditableTagItem> _editableTags = new();
     private string? _selectedTag;
     private PostListItem? _selectedItem;
+    private SortOption _selectedSort = SortOption.SavedAtDesc;
 
     public MainWindow()
     {
         InitializeComponent();
+        InitializeSortOptions();
         Loaded += MainWindow_Loaded;
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
-        SetApiStatus(null, "API: 起動確認中...");
         var result = await App.ApiManager.EnsureStartedAsync();
-        SetApiStatus(result.ok, result.ok ? "API: 正常稼働" : "API: 起動失敗");
 
         if (!result.ok)
         {
@@ -48,12 +43,6 @@ public partial class MainWindow : Window
 
         LoadSavedPosts();
         ShowHomeState();
-    }
-
-    private async void HealthCheck_Click(object sender, RoutedEventArgs e)
-    {
-        var ok = await App.ApiManager.IsHealthyAsync();
-        SetApiStatus(ok, ok ? "API: 正常稼働" : "API: 起動失敗");
     }
 
     private void ReloadPosts_Click(object sender, RoutedEventArgs e)
@@ -92,9 +81,18 @@ public partial class MainWindow : Window
 
     private void SearchBox_TextChanged(object sender, TextChangedEventArgs e) => ApplyFilter();
 
-    private void SearchBox_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e) => ForceJapaneseIme(SearchBox);
+    private void SortOrderComboBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (SortOrderComboBox.SelectedItem is not SortOptionItem option)
+        {
+            return;
+        }
 
-    private void NewTagText_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e) => ForceJapaneseIme(NewTagText);
+        _selectedSort = option.Value;
+        ApplyFilter();
+    }
+
+    private void SearchBox_GotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e) => ForceJapaneseIme(SearchBox);
 
     private void DetailNoteTextBox_TextChanged(object sender, TextChangedEventArgs e)
     {
@@ -103,7 +101,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetMemoStatus("メモはまだ保存されていません。", isError: false, isSuccess: false);
+        SetMemoStatus("メモはまだ保存されていません。");
     }
 
     private void TagFilterList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -171,80 +169,22 @@ public partial class MainWindow : Window
         ShowHomeState();
     }
 
-    private void AddExistingTagButton_Click(object sender, RoutedEventArgs e)
+    private void OpenTagEditor_Click(object sender, RoutedEventArgs e)
     {
         if (_selectedItem is null)
         {
             return;
         }
 
-        if (ExistingTagComboBox.SelectedItem is not ExistingTagOption option)
+        var window = new TagEditWindow(
+            _editableTags.Select(x => x.Name).ToList(),
+            _tagCatalog,
+            ApplyTagsFromEditor)
         {
-            SetTagActionStatus("追加する既存タグを選択してください。", isError: true);
-            return;
-        }
+            Owner = this
+        };
 
-        if (option.IsAlreadySelected)
-        {
-            SetTagActionStatus("そのタグはすでに選択済みです。", isError: true);
-            return;
-        }
-
-        _editableTags.Add(new EditableTagItem { Name = option.Name });
-        ExistingTagComboBox.SelectedItem = null;
-        SaveTagsImmediately();
-    }
-
-    private void AddTag_Click(object sender, RoutedEventArgs e)
-    {
-        if (_selectedItem is null)
-        {
-            return;
-        }
-
-        if (!TryNormalizeTagInput(NewTagText.Text, out var tag))
-        {
-            SetTagActionStatus("タグには日本語、英数字、空白のみ使用できます。", isError: true);
-            return;
-        }
-
-        if (_editableTags.Any(x => string.Equals(x.Name, tag, StringComparison.OrdinalIgnoreCase)))
-        {
-            NewTagText.Text = string.Empty;
-            SetTagActionStatus("そのタグはすでに選択済みです。", isError: true);
-            return;
-        }
-
-        _editableTags.Add(new EditableTagItem { Name = tag });
-        NewTagText.Text = string.Empty;
-        SaveTagsImmediately();
-    }
-
-    private void RemoveTag_Click(object sender, RoutedEventArgs e)
-    {
-        if (_selectedItem is null)
-        {
-            return;
-        }
-
-        var tagName = (sender as FrameworkElement)?.Tag as string;
-        if (string.IsNullOrWhiteSpace(tagName))
-        {
-            return;
-        }
-
-        var remainingTags = _editableTags
-            .Where(x => !string.Equals(x.Name, tagName, StringComparison.OrdinalIgnoreCase))
-            .Select(x => x.Name)
-            .ToList();
-
-        _editableTags.Clear();
-        foreach (var remainingTag in remainingTags)
-        {
-            _editableTags.Add(new EditableTagItem { Name = remainingTag });
-        }
-
-        SaveTagsImmediately();
+        window.ShowDialog();
     }
 
     private void SaveDetailEdits_Click(object sender, RoutedEventArgs e)
@@ -260,8 +200,9 @@ public partial class MainWindow : Window
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        if (!SaveSelectedPostChanges(tags, DetailNoteTextBox.Text ?? string.Empty, out var updated))
+        if (!SaveSelectedPostChanges(tags, DetailNoteTextBox.Text ?? string.Empty, out var updated, out var errorMessage))
         {
+            SetMemoStatus(errorMessage, isError: true);
             return;
         }
 
@@ -292,8 +233,14 @@ public partial class MainWindow : Window
                         continue;
                     }
 
-                    var savedAt = DateTimeOffset.TryParse(meta.saved_at, out var dto)
-                        ? dto.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
+                    var savedAtValue = DateTimeOffset.TryParse(meta.saved_at, out var savedAtDto)
+                        ? savedAtDto
+                        : (DateTimeOffset?)null;
+                    var createdAtValue = DateTimeOffset.TryParse(meta.created_at, out var createdAtDto)
+                        ? createdAtDto
+                        : (DateTimeOffset?)null;
+                    var savedAt = savedAtValue.HasValue
+                        ? savedAtValue.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
                         : meta.saved_at;
 
                     var mediaFiles = BuildMediaFileItems(dir, meta);
@@ -302,6 +249,8 @@ public partial class MainWindow : Window
                     items.Add(new PostListItem
                     {
                         SavedAt = savedAt,
+                        SavedAtSortValue = savedAtValue,
+                        CreatedAtSortValue = createdAtValue,
                         Author = string.IsNullOrWhiteSpace(meta.author?.name)
                             ? meta.author?.handle ?? string.Empty
                             : $"{meta.author.name} ({meta.author.handle})",
@@ -319,7 +268,7 @@ public partial class MainWindow : Window
                 }
                 catch
                 {
-                    // broken meta.json is skipped
+                    // ignore broken meta.json
                 }
             }
         }
@@ -370,7 +319,7 @@ public partial class MainWindow : Window
                 ContainsIgnoreCase(x.TweetId, keyword));
         }
 
-        var list = query.ToList();
+        var list = ApplySort(query).ToList();
         PostsCardList.ItemsSource = list;
 
         var totalImages = _allItems.Sum(x => x.ImageCount);
@@ -415,11 +364,7 @@ public partial class MainWindow : Window
         RefreshTagEditor();
         DetailNoteTextBox.Text = string.Empty;
         DetailNoteTextBox.IsEnabled = false;
-        NewTagText.Text = string.Empty;
-        NewTagText.IsEnabled = false;
-        ExistingTagComboBox.SelectedItem = null;
-        ExistingTagComboBox.IsEnabled = false;
-        AddExistingTagButton.IsEnabled = false;
+        OpenTagEditorButton.IsEnabled = false;
         SetTagActionStatus(string.Empty);
         SetMemoStatus(string.Empty);
     }
@@ -440,11 +385,7 @@ public partial class MainWindow : Window
         RefreshTagEditor();
         DetailNoteTextBox.Text = item.Note ?? string.Empty;
         DetailNoteTextBox.IsEnabled = true;
-        NewTagText.Text = string.Empty;
-        NewTagText.IsEnabled = true;
-        ExistingTagComboBox.IsEnabled = true;
-        AddExistingTagButton.IsEnabled = true;
-        ExistingTagComboBox.SelectedItem = null;
+        OpenTagEditorButton.IsEnabled = true;
         SetTagActionStatus(string.Empty);
         SetMemoStatus(string.Empty);
 
@@ -461,34 +402,32 @@ public partial class MainWindow : Window
             : item.MediaFiles;
     }
 
-    private void SaveTagsImmediately()
+    private TagEditSaveResult ApplyTagsFromEditor(IReadOnlyList<string> tags)
     {
         if (_selectedItem is null)
         {
-            return;
+            return new TagEditSaveResult(false, "投稿が選択されていません。");
         }
 
-        var tags = _editableTags
-            .Select(x => x.Name.Trim())
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (!SaveSelectedPostChanges(tags, _selectedItem.Note, out var updated))
+        if (!SaveSelectedPostChanges(tags.ToList(), _selectedItem.Note, out var updated, out var errorMessage))
         {
-            return;
+            SetTagActionStatus(errorMessage, isError: true);
+            return new TagEditSaveResult(false, errorMessage);
         }
 
         SetTagActionStatus("タグを保存しました。", isSuccess: true);
         ShowPostDetail(updated);
+        return new TagEditSaveResult(true, "タグを保存しました。");
     }
 
-    private bool SaveSelectedPostChanges(List<string> tags, string note, out PostListItem updated)
+    private bool SaveSelectedPostChanges(List<string> tags, string note, out PostListItem updated, out string errorMessage)
     {
         updated = _selectedItem!;
+        errorMessage = string.Empty;
 
         if (_selectedItem is null)
         {
+            errorMessage = "投稿が選択されていません。";
             return false;
         }
 
@@ -497,7 +436,7 @@ public partial class MainWindow : Window
             var metaPath = Path.Combine(_selectedItem.DirPath, "meta.json");
             if (!File.Exists(metaPath))
             {
-                SetTagActionStatus("meta.json が見つかりません。", isError: true);
+                errorMessage = "meta.json が見つかりません。";
                 return false;
             }
 
@@ -505,7 +444,7 @@ public partial class MainWindow : Window
             var node = JsonNode.Parse(text) as JsonObject;
             if (node is null)
             {
-                SetTagActionStatus("meta.json を読み込めませんでした。", isError: true);
+                errorMessage = "meta.json を読み込めませんでした。";
                 return false;
             }
 
@@ -549,20 +488,9 @@ public partial class MainWindow : Window
         }
         catch (Exception ex)
         {
-            SetTagActionStatus(ex.Message, isError: true);
+            errorMessage = ex.Message;
             return false;
         }
-    }
-
-    private bool TryNormalizeTagInput(string? raw, out string tag)
-    {
-        tag = (raw ?? string.Empty).Trim();
-        if (string.IsNullOrWhiteSpace(tag))
-        {
-            return false;
-        }
-
-        return AllowedTagPattern.IsMatch(tag);
     }
 
     private void DetailMediaList_MouseDoubleClick(object sender, MouseButtonEventArgs e) => OpenSelectedMedia();
@@ -613,20 +541,7 @@ public partial class MainWindow : Window
         DetailTagItems.ItemsSource = _editableTags.OrderBy(x => x.Name).ToList();
         DetailTagText.Text = _editableTags.Count == 0
             ? "タグ: なし"
-            : $"タグ: {string.Join(", ", _editableTags.Select(x => x.Name))}";
-
-        var currentTags = _editableTags
-            .Select(x => x.Name)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        ExistingTagComboBox.ItemsSource = _tagCatalog
-            .OrderBy(x => x.Name)
-            .Select(x => new ExistingTagOption(
-                x.Name,
-                x.Count,
-                currentTags.Contains(x.Name),
-                currentTags.Contains(x.Name) ? DisabledBrush : Brushes.Black))
-            .ToList();
+            : $"タグ: {string.Join(", ", _editableTags.Select(x => $"#{x.Name}"))}";
     }
 
     private void SetTagActionStatus(string text, bool isError = false, bool isSuccess = false)
@@ -683,29 +598,40 @@ public partial class MainWindow : Window
         return list;
     }
 
-    private void SetApiStatus(bool? healthy, string text)
+    private void InitializeSortOptions()
     {
-        ApiStatusText.Text = text;
-
-        if (healthy == true)
+        SortOrderComboBox.ItemsSource = new[]
         {
-            ApiStatusText.Foreground = SuccessBrush;
-            return;
-        }
+            new SortOptionItem("保存日時: 新しい順", SortOption.SavedAtDesc),
+            new SortOptionItem("保存日時: 古い順", SortOption.SavedAtAsc),
+            new SortOptionItem("投稿日時: 新しい順", SortOption.CreatedAtDesc),
+            new SortOptionItem("投稿日時: 古い順", SortOption.CreatedAtAsc),
+            new SortOptionItem("投稿者名: A-Z", SortOption.AuthorAsc),
+            new SortOptionItem("投稿者名: Z-A", SortOption.AuthorDesc)
+        };
+        SortOrderComboBox.SelectedIndex = 0;
+    }
 
-        if (healthy == false)
+    private IEnumerable<PostListItem> ApplySort(IEnumerable<PostListItem> items)
+    {
+        return _selectedSort switch
         {
-            ApiStatusText.Foreground = ErrorBrush;
-            return;
-        }
-
-        ApiStatusText.Foreground = new SolidColorBrush(Color.FromRgb(55, 48, 163));
+            SortOption.SavedAtAsc => items.OrderBy(x => x.SavedAtSortValue).ThenBy(x => x.TweetId),
+            SortOption.SavedAtDesc => items.OrderByDescending(x => x.SavedAtSortValue).ThenByDescending(x => x.TweetId),
+            SortOption.CreatedAtAsc => items.OrderBy(x => x.CreatedAtSortValue).ThenBy(x => x.TweetId),
+            SortOption.CreatedAtDesc => items.OrderByDescending(x => x.CreatedAtSortValue).ThenByDescending(x => x.TweetId),
+            SortOption.AuthorAsc => items.OrderBy(x => x.Author, StringComparer.CurrentCulture).ThenByDescending(x => x.SavedAtSortValue),
+            SortOption.AuthorDesc => items.OrderByDescending(x => x.Author, StringComparer.CurrentCulture).ThenByDescending(x => x.SavedAtSortValue),
+            _ => items
+        };
     }
 }
 
 public sealed class PostListItem
 {
     public string SavedAt { get; init; } = string.Empty;
+    public DateTimeOffset? SavedAtSortValue { get; init; }
+    public DateTimeOffset? CreatedAtSortValue { get; init; }
     public string Author { get; init; } = string.Empty;
     public string Text { get; init; } = string.Empty;
     public string Tags { get; init; } = string.Empty;
@@ -727,23 +653,6 @@ public sealed class TagFilterItem
     public string Display => $"{Name} ({Count})";
 }
 
-public sealed class ExistingTagOption
-{
-    public ExistingTagOption(string name, int count, bool isAlreadySelected, Brush foregroundBrush)
-    {
-        Name = name;
-        Count = count;
-        IsAlreadySelected = isAlreadySelected;
-        ForegroundBrush = foregroundBrush;
-    }
-
-    public string Name { get; }
-    public int Count { get; }
-    public bool IsAlreadySelected { get; }
-    public Brush ForegroundBrush { get; }
-    public string Display => IsAlreadySelected ? $"{Name} ({Count}) - 選択済み" : $"{Name} ({Count})";
-}
-
 public sealed class MediaFileItem
 {
     public string Type { get; init; } = string.Empty;
@@ -757,6 +666,21 @@ public sealed class EditableTagItem
 }
 
 public sealed record TagCatalogItem(string Name, int Count);
+public sealed record TagEditSaveResult(bool Success, string Message);
+public sealed record SortOptionItem(string Label, SortOption Value)
+{
+    public override string ToString() => Label;
+}
+
+public enum SortOption
+{
+    SavedAtDesc,
+    SavedAtAsc,
+    CreatedAtDesc,
+    CreatedAtAsc,
+    AuthorAsc,
+    AuthorDesc
+}
 
 public sealed record MetaJson(
     string tweet_id,

@@ -64,11 +64,58 @@
             </Setter>
         </Style>
 
+        <Style x:Key="InlineIconButton" TargetType="Button">
+            <Setter Property="Width" Value="32"/>
+            <Setter Property="Height" Value="32"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{StaticResource Primary}"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontFamily" Value="Segoe MDL2 Assets"/>
+            <Setter Property="FontSize" Value="16"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}" CornerRadius="16">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
         <Style x:Key="TagChip" TargetType="Border">
             <Setter Property="Background" Value="{StaticResource TagBg}"/>
             <Setter Property="CornerRadius" Value="999"/>
             <Setter Property="Padding" Value="10,4"/>
             <Setter Property="Margin" Value="0,0,8,8"/>
+        </Style>
+
+        <Style x:Key="SelectableTextDisplay" TargetType="TextBox">
+            <Setter Property="IsReadOnly" Value="True"/>
+            <Setter Property="IsReadOnlyCaretVisible" Value="True"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="TextWrapping" Value="Wrap"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+        </Style>
+
+        <Style x:Key="TagFilterListItemStyle" TargetType="ListBoxItem">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="0"/>
+            <Setter Property="Margin" Value="0"/>
+            <Setter Property="FocusVisualStyle" Value="{x:Null}"/>
+            <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ListBoxItem">
+                        <ContentPresenter/>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
     </Window.Resources>
 
@@ -94,46 +141,43 @@
                             Content="&#xE80F;"/>
                 </StackPanel>
 
-                <StackPanel Grid.Column="1">
-                    <StackPanel Orientation="Horizontal">
-                        <Border Width="42" Height="42" Background="#111827" CornerRadius="21" Margin="0,0,10,0">
-                            <TextBlock Text="&#xE721;"
-                                       FontFamily="Segoe MDL2 Assets"
-                                       FontSize="18"
-                                       Foreground="White"
-                                       HorizontalAlignment="Center"
-                                       VerticalAlignment="Center"/>
-                        </Border>
-                        <StackPanel>
-                            <TextBlock Text="検索欄" FontSize="14" FontWeight="Bold" Foreground="{StaticResource TextMain}"/>
-                            <TextBlock Text="投稿本文、投稿者、タグ、Tweet ID で絞り込みできます。"
-                                       Margin="0,4,0,0"
-                                       Foreground="{StaticResource TextSub}"/>
-                        </StackPanel>
-                    </StackPanel>
+                <Border Grid.Column="1"
+                        Height="38"
+                        CornerRadius="19"
+                        Background="#FFFFFF"
+                        BorderBrush="{StaticResource Border}"
+                        BorderThickness="1"
+                        Padding="12,0"
+                        VerticalAlignment="Center">
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="*"/>
+                        </Grid.ColumnDefinitions>
 
-                    <TextBox x:Name="SearchBox"
-                             Height="40"
-                             VerticalContentAlignment="Center"
-                             Padding="12,0"
-                             Margin="0,10,0,0"
-                             TextChanged="SearchBox_TextChanged"
-                             GotKeyboardFocus="SearchBox_GotKeyboardFocus"
-                             ToolTip="検索欄"
-                             InputMethod.IsInputMethodEnabled="True"
-                             InputMethod.PreferredImeState="On"
-                             Language="ja-JP"/>
-                </StackPanel>
+                        <TextBlock Text="&#xE721;"
+                                   FontFamily="Segoe MDL2 Assets"
+                                   FontSize="16"
+                                   Foreground="{StaticResource TextSub}"
+                                   VerticalAlignment="Center"/>
 
-                <StackPanel Grid.Column="2" VerticalAlignment="Top" Margin="12,0,0,0">
-                    <Border Background="#EEF2FF" CornerRadius="999" Padding="10,4" HorizontalAlignment="Right" Margin="0,0,0,8">
-                        <TextBlock x:Name="ApiStatusText" Text="API: 起動確認中..." Foreground="{StaticResource TagText}" FontWeight="SemiBold"/>
-                    </Border>
-                    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-                        <Button Content="疎通確認" Style="{StaticResource PrimaryButton}" Width="78" Click="HealthCheck_Click"/>
-                        <Button Content="再読込" Style="{StaticResource PrimaryButton}" Width="78" Margin="8,0,0,0" Click="ReloadPosts_Click"/>
-                    </StackPanel>
-                </StackPanel>
+                        <TextBox x:Name="SearchBox"
+                                 Grid.Column="1"
+                                 Height="24"
+                                 Margin="10,0,0,0"
+                                 VerticalContentAlignment="Center"
+                                 Background="Transparent"
+                                 BorderThickness="0"
+                                 Padding="0"
+                                 TextChanged="SearchBox_TextChanged"
+                                 GotKeyboardFocus="SearchBox_GotKeyboardFocus"
+                                 ToolTip="検索欄"
+                                 InputMethod.IsInputMethodEnabled="True"
+                                 InputMethod.PreferredImeState="On"
+                                 Language="ja-JP"/>
+                    </Grid>
+                </Border>
+
             </Grid>
         </Border>
 
@@ -152,8 +196,40 @@
                     </Grid.RowDefinitions>
 
                     <StackPanel>
-                        <TextBlock Text="投稿一覧" FontSize="24" FontWeight="Bold" Foreground="{StaticResource TextMain}"/>
-                        <TextBlock x:Name="TagSummaryText" Margin="0,6,0,0" Foreground="{StaticResource TextSub}" Text="すべての投稿を表示中"/>
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*"/>
+                                <ColumnDefinition Width="Auto"/>
+                            </Grid.ColumnDefinitions>
+
+                            <StackPanel>
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="Auto"/>
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock Text="投稿一覧" FontSize="24" FontWeight="Bold" Foreground="{StaticResource TextMain}" VerticalAlignment="Center"/>
+                                    <Button Grid.Column="1"
+                                            Content="&#xE72C;"
+                                            Margin="12,0,0,0"
+                                            VerticalAlignment="Center"
+                                            ToolTip="一覧を更新"
+                                            Style="{StaticResource InlineIconButton}"
+                                            Click="ReloadPosts_Click"/>
+                                </Grid>
+                                <TextBox x:Name="TagSummaryText" Margin="0,6,0,0" Foreground="{StaticResource TextSub}" Text="すべての投稿を表示中" Style="{StaticResource SelectableTextDisplay}"/>
+                            </StackPanel>
+
+                            <StackPanel Grid.Column="1" Margin="16,0,0,0" VerticalAlignment="Top">
+                                <TextBlock Text="並び替え" FontWeight="SemiBold" Foreground="{StaticResource TextSub}" HorizontalAlignment="Left"/>
+                                <ComboBox x:Name="SortOrderComboBox"
+                                          Width="190"
+                                          Height="34"
+                                          Margin="0,6,0,0"
+                                          SelectionChanged="SortOrderComboBox_SelectionChanged"/>
+                            </StackPanel>
+                        </Grid>
 
                         <Border Margin="0,12,0,0" Background="{StaticResource MutedSurface}" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="12" Padding="12">
                             <StackPanel>
@@ -177,6 +253,7 @@
                                          SelectionChanged="TagFilterList_SelectionChanged"
                                          BorderThickness="0"
                                          Background="Transparent"
+                                         ItemContainerStyle="{StaticResource TagFilterListItemStyle}"
                                          ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                          ScrollViewer.VerticalScrollBarVisibility="Disabled">
                                     <ListBox.ItemsPanel>
@@ -186,9 +263,18 @@
                                     </ListBox.ItemsPanel>
                                     <ListBox.ItemTemplate>
                                         <DataTemplate>
-                                            <Border Style="{StaticResource TagChip}">
+                                            <Border x:Name="TagFilterChip"
+                                                    Style="{StaticResource TagChip}">
                                                 <TextBlock Text="{Binding Display}" Foreground="{StaticResource TagText}"/>
                                             </Border>
+                                            <DataTemplate.Triggers>
+                                                <DataTrigger Binding="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=IsSelected}" Value="True">
+                                                    <Setter TargetName="TagFilterChip" Property="Background" Value="{StaticResource Primary}"/>
+                                                </DataTrigger>
+                                                <DataTrigger Binding="{Binding RelativeSource={RelativeSource AncestorType=ListBoxItem}, Path=IsSelected}" Value="True">
+                                                    <Setter TargetName="TagFilterChip" Property="TextElement.Foreground" Value="White"/>
+                                                </DataTrigger>
+                                            </DataTemplate.Triggers>
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
                                 </ListBox>
@@ -215,10 +301,10 @@
                                         </Border>
 
                                         <StackPanel Grid.Column="1" Margin="12,0,0,0">
-                                            <TextBlock Text="{Binding Author}" FontWeight="SemiBold" Foreground="{StaticResource TextMain}"/>
-                                            <TextBlock Text="{Binding SavedAt}" Margin="0,2,0,0" Foreground="{StaticResource TextSub}" FontSize="12"/>
-                                            <TextBlock Text="{Binding Text}" Margin="0,8,0,0" TextWrapping="Wrap" Foreground="{StaticResource TextMain}" MaxHeight="56"/>
-                                            <TextBlock Text="{Binding Tags}" Margin="0,8,0,0" Foreground="{StaticResource TextSub}" FontSize="12"/>
+                                            <TextBox Text="{Binding Author, Mode=OneWay}" FontWeight="SemiBold" Foreground="{StaticResource TextMain}" Style="{StaticResource SelectableTextDisplay}"/>
+                                            <TextBox Text="{Binding SavedAt, Mode=OneWay}" Margin="0,2,0,0" Foreground="{StaticResource TextSub}" FontSize="12" Style="{StaticResource SelectableTextDisplay}"/>
+                                            <TextBox Text="{Binding Text, Mode=OneWay}" Margin="0,8,0,0" TextWrapping="Wrap" Foreground="{StaticResource TextMain}" MaxHeight="56" AcceptsReturn="True" Style="{StaticResource SelectableTextDisplay}"/>
+                                            <TextBox Text="{Binding Tags, Mode=OneWay}" Margin="0,8,0,0" Foreground="{StaticResource TextSub}" FontSize="12" Style="{StaticResource SelectableTextDisplay}"/>
                                             <Button Content="投稿詳細を開く" Width="110" HorizontalAlignment="Left" Margin="0,8,0,0" Click="CardOpenDetail_Click"/>
                                         </StackPanel>
                                     </Grid>
@@ -235,33 +321,34 @@
                               CanContentScroll="False">
                     <StackPanel>
                         <StackPanel>
-                            <TextBlock x:Name="DetailTitleText" Text="投稿詳細" FontSize="24" FontWeight="Bold" Foreground="{StaticResource TextMain}"/>
-                            <TextBlock x:Name="DetailSubTitleText"
+                            <TextBox x:Name="DetailTitleText" Text="投稿詳細" FontSize="24" FontWeight="Bold" Foreground="{StaticResource TextMain}" Style="{StaticResource SelectableTextDisplay}"/>
+                            <TextBox x:Name="DetailSubTitleText"
                                        Margin="0,6,0,0"
                                        Foreground="{StaticResource TextSub}"
                                        TextWrapping="Wrap"
-                                       Text="左の一覧から投稿を選択してください。"/>
+                                       Text="左の一覧から投稿を選択してください。" Style="{StaticResource SelectableTextDisplay}"/>
                         </StackPanel>
 
                         <Border Margin="0,12,0,0" Background="{StaticResource MutedSurface}" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="12" Padding="12">
                             <StackPanel>
                                 <TextBlock Text="投稿本文" FontWeight="Bold" Foreground="{StaticResource TextMain}"/>
-                                <TextBlock x:Name="DetailTweetText"
+                                <TextBox x:Name="DetailTweetText"
                                            Margin="0,8,0,0"
                                            TextWrapping="Wrap"
                                            Foreground="{StaticResource TextMain}"
-                                           Text="一覧から投稿を選択すると、ここに本文が表示されます。"/>
+                                           Text="一覧から投稿を選択すると、ここに本文が表示されます。" AcceptsReturn="True" Style="{StaticResource SelectableTextDisplay}"/>
                             </StackPanel>
                         </Border>
 
                         <Border Margin="0,12,0,0" Background="{StaticResource MutedSurface}" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="12" Padding="12">
                             <StackPanel>
                                 <TextBlock Text="タグ" FontWeight="Bold" Foreground="{StaticResource TextMain}"/>
-                                <TextBlock x:Name="DetailTagText"
+
+                                <TextBox x:Name="DetailTagText"
                                            Margin="0,8,0,0"
                                            TextWrapping="Wrap"
                                            Foreground="{StaticResource TextSub}"
-                                           Text="タグ: なし"/>
+                                           Text="タグ: なし" Style="{StaticResource SelectableTextDisplay}"/>
 
                                 <ItemsControl x:Name="DetailTagItems" Margin="0,10,0,0">
                                     <ItemsControl.ItemsPanel>
@@ -271,57 +358,31 @@
                                     </ItemsControl.ItemsPanel>
                                     <ItemsControl.ItemTemplate>
                                         <DataTemplate>
-                                            <Border Background="#EEF2FF" CornerRadius="999" Margin="0,0,8,8" Padding="10,4">
-                                                <StackPanel Orientation="Horizontal">
-                                                    <TextBlock Text="{Binding Name}" Foreground="#3730A3" VerticalAlignment="Center"/>
-                                                    <Button Content="×"
-                                                            Tag="{Binding Name}"
-                                                            Margin="8,0,0,0"
-                                                            Width="22"
-                                                            Height="22"
-                                                            Padding="0"
-                                                            Click="RemoveTag_Click"/>
-                                                </StackPanel>
+                                            <Border Style="{StaticResource TagChip}">
+                                                <TextBox Text="{Binding Name, Mode=OneWay}" Foreground="{StaticResource TagText}" Style="{StaticResource SelectableTextDisplay}"/>
                                             </Border>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
 
-                                <StackPanel Orientation="Horizontal" Margin="0,4,0,0">
-                                    <TextBox x:Name="NewTagText"
-                                             Width="240"
-                                             Height="32"
-                                             VerticalContentAlignment="Center"
-                                             Padding="8,0"
-                                             GotKeyboardFocus="NewTagText_GotKeyboardFocus"
-                                             InputMethod.IsInputMethodEnabled="True"
-                                             InputMethod.PreferredImeState="On"
-                                             Language="ja-JP"/>
-                                    <Button Content="タグを追加" Margin="8,0,0,0" Width="92" Click="AddTag_Click"/>
-                                </StackPanel>
+                                <Button x:Name="OpenTagEditorButton"
+                                        Width="28"
+                                        Height="28"
+                                        Margin="0,0,0,8"
+                                        HorizontalAlignment="Left"
+                                        Background="Transparent"
+                                        BorderThickness="0"
+                                        FontSize="18"
+                                        Foreground="{StaticResource Primary}"
+                                        Cursor="Hand"
+                                        ToolTip="タグを編集"
+                                        Content="+"
+                                        Click="OpenTagEditor_Click"/>
 
-                                <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
-                                    <ComboBox x:Name="ExistingTagComboBox"
-                                              Width="240"
-                                              Height="32">
-                                        <ComboBox.ItemTemplate>
-                                            <DataTemplate>
-                                                <TextBlock Text="{Binding Display}"
-                                                           Foreground="{Binding ForegroundBrush}"/>
-                                            </DataTemplate>
-                                        </ComboBox.ItemTemplate>
-                                    </ComboBox>
-                                    <Button x:Name="AddExistingTagButton"
-                                            Content="既存タグ追加"
-                                            Margin="8,0,0,0"
-                                            Width="92"
-                                            Click="AddExistingTagButton_Click"/>
-                                </StackPanel>
-
-                                <TextBlock x:Name="TagActionStatusText"
+                                <TextBox x:Name="TagActionStatusText"
                                            Margin="0,10,0,0"
                                            Foreground="{StaticResource TextSub}"
-                                           Text=""/>
+                                           Text="" Style="{StaticResource SelectableTextDisplay}"/>
 
                                 <TextBlock Text="メモ" Margin="0,12,0,0" FontWeight="Bold" Foreground="{StaticResource TextMain}"/>
                                 <TextBox x:Name="DetailNoteTextBox"
@@ -337,11 +398,11 @@
                                             Width="92"
                                             Style="{StaticResource PrimaryButton}"
                                             Click="SaveDetailEdits_Click"/>
-                                    <TextBlock x:Name="DetailSaveStatusText"
+                                    <TextBox x:Name="DetailSaveStatusText"
                                                Margin="12,0,0,0"
                                                VerticalAlignment="Center"
                                                Foreground="{StaticResource TextSub}"
-                                               Text=""/>
+                                               Text="" Style="{StaticResource SelectableTextDisplay}"/>
                                 </StackPanel>
                             </StackPanel>
                         </Border>
@@ -366,8 +427,8 @@
                                                         <Image Source="{Binding FullPath}" Stretch="UniformToFill"/>
                                                     </Border>
                                                     <StackPanel Grid.Column="1" Margin="12,0,0,0">
-                                                        <TextBlock Text="{Binding Display}" FontWeight="SemiBold" Foreground="{StaticResource TextMain}"/>
-                                                        <TextBlock Text="{Binding FullPath}" Margin="0,6,0,0" TextWrapping="Wrap" Foreground="{StaticResource TextSub}" FontSize="12"/>
+                                                        <TextBox Text="{Binding Display, Mode=OneWay}" FontWeight="SemiBold" Foreground="{StaticResource TextMain}" Style="{StaticResource SelectableTextDisplay}"/>
+                                                        <TextBox Text="{Binding FullPath, Mode=OneWay}" Margin="0,6,0,0" TextWrapping="Wrap" Foreground="{StaticResource TextSub}" FontSize="12" AcceptsReturn="True" Style="{StaticResource SelectableTextDisplay}"/>
                                                         <Button Content="開く"
                                                                 Width="72"
                                                                 Margin="0,8,0,0"
@@ -396,6 +457,6 @@
             </Border>
         </Grid>
 
-        <TextBlock Grid.Row="2" x:Name="ListStatsText" Margin="2,10,2,0" Foreground="{StaticResource TextSub}"/>
+        <TextBox Grid.Row="2" x:Name="ListStatsText" Margin="2,10,2,0" Foreground="{StaticResource TextSub}" Style="{StaticResource SelectableTextDisplay}"/>
     </Grid>
 </Window>

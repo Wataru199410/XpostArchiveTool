@@ -1,35 +1,145 @@
-﻿const BUTTON_ID = "x-post-archive-save-button";
+const STYLE_ID = "x-post-archive-inline-style";
+const BUTTON_CLASS = "x-post-archive-inline-save";
+const BUTTON_HOST_ATTR = "data-x-post-archive-save-host";
+const ARTICLE_BOUND_ATTR = "data-x-post-archive-bound";
 const MODAL_ID = "x-post-archive-modal";
+
+let scanScheduled = false;
 
 boot();
 
 function boot() {
-  if (document.getElementById(BUTTON_ID)) return;
+  installStyles();
+  scanArticles();
 
-  const button = document.createElement("button");
-  button.id = BUTTON_ID;
-  button.textContent = "投稿を保存";
-  Object.assign(button.style, {
-    position: "fixed",
-    right: "16px",
-    bottom: "16px",
-    zIndex: "999999",
-    background: "#1d9bf0",
-    color: "white",
-    border: "none",
-    borderRadius: "999px",
-    padding: "10px 16px",
-    fontWeight: "700",
-    cursor: "pointer"
+  const observer = new MutationObserver(() => {
+    if (scanScheduled) {
+      return;
+    }
+
+    scanScheduled = true;
+    requestAnimationFrame(() => {
+      scanScheduled = false;
+      scanArticles();
+    });
   });
 
-  button.addEventListener("click", onSaveClick);
-  document.body.appendChild(button);
+  observer.observe(document.documentElement, {
+    childList: true,
+    subtree: true
+  });
 }
 
-async function onSaveClick() {
+function installStyles() {
+  if (document.getElementById(STYLE_ID)) {
+    return;
+  }
+
+  const style = document.createElement("style");
+  style.id = STYLE_ID;
+  style.textContent = `
+    .${BUTTON_CLASS} {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 88px;
+      height: 32px;
+      border: none;
+      border-radius: 999px;
+      padding: 0 14px;
+      background: #1d9bf0;
+      color: #ffffff;
+      font-size: 13px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.12s ease, opacity 0.12s ease, background 0.12s ease;
+      box-shadow: 0 4px 12px rgba(29, 155, 240, 0.28);
+    }
+
+    .${BUTTON_CLASS}:hover {
+      background: #1681cc;
+      transform: translateY(-1px);
+    }
+
+    .${BUTTON_CLASS}:disabled {
+      cursor: default;
+      opacity: 0.72;
+      transform: none;
+      box-shadow: none;
+    }
+  `;
+
+  document.documentElement.appendChild(style);
+}
+
+function scanArticles() {
+  const articles = document.querySelectorAll("article");
+  for (const article of articles) {
+    bindArticle(article);
+  }
+}
+
+function bindArticle(article) {
+  if (!(article instanceof HTMLElement)) {
+    return;
+  }
+
+  const tweetId = resolveTweetIdFromArticle(article);
+  if (!tweetId) {
+    return;
+  }
+
+  if (article.getAttribute(ARTICLE_BOUND_ATTR) === tweetId) {
+    return;
+  }
+
+  article.setAttribute(ARTICLE_BOUND_ATTR, tweetId);
+
+  const existingHost = article.querySelector(`[${BUTTON_HOST_ATTR}]`);
+  if (existingHost) {
+    existingHost.remove();
+  }
+
+  const actionBar = findActionBar(article);
+  if (!actionBar) {
+    return;
+  }
+
+  const host = document.createElement("div");
+  host.setAttribute(BUTTON_HOST_ATTR, "true");
+  Object.assign(host.style, {
+    display: "flex",
+    justifyContent: "flex-end",
+    marginTop: "8px"
+  });
+
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = BUTTON_CLASS;
+  button.textContent = "保存";
+  button.setAttribute("aria-label", "この投稿を保存");
+
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await onInlineSaveClick(article, button);
+  });
+
+  host.addEventListener("click", (event) => {
+    event.stopPropagation();
+  });
+
+  host.appendChild(button);
+  actionBar.insertAdjacentElement("afterend", host);
+}
+
+async function onInlineSaveClick(article, button) {
+  const originalLabel = button.textContent;
+
   try {
-    const payload = await extractPostData();
+    setButtonState(button, "保存中...", true);
+
+    const payload = await extractPostData(article);
     const result = await chrome.runtime.sendMessage({ type: "SAVE_POST", payload });
 
     if (!result?.ok) {
@@ -42,13 +152,17 @@ async function onSaveClick() {
           `${body.message || "リクエストに失敗しました。"}\n\n再試行しますか？`,
           detail
         );
+
         if (retry) {
+          setButtonState(button, "再試行中...", true);
           const retryResult = await chrome.runtime.sendMessage({ type: "SAVE_POST", payload });
           if (!retryResult?.ok) {
             await showResultDialog("再試行に失敗しました", buildErrorDetail(retryResult, payload), true);
             return;
           }
+
           await showResultDialog("保存しました", JSON.stringify(retryResult.body || {}, null, 2), false);
+          flashSaved(button);
           return;
         }
       }
@@ -58,24 +172,41 @@ async function onSaveClick() {
     }
 
     await showResultDialog("保存しました", JSON.stringify(result.body || {}, null, 2), false);
+    flashSaved(button);
   } catch (error) {
     const detail = `Unhandled Error\n\n${String(error)}\n\n${error?.stack || ""}`;
     await showResultDialog("予期しないエラー", detail, true);
+  } finally {
+    if (button.textContent !== "保存済み") {
+      setButtonState(button, originalLabel || "保存", false);
+    }
   }
 }
 
-async function extractPostData() {
-  const url = location.href;
-  const tweetId = resolveTweetId(url);
+function flashSaved(button) {
+  setButtonState(button, "保存済み", true);
+  button.style.background = "#0f766e";
+  button.style.boxShadow = "none";
+
+  window.setTimeout(() => {
+    button.style.background = "#1d9bf0";
+    button.style.boxShadow = "0 4px 12px rgba(29, 155, 240, 0.28)";
+    setButtonState(button, "保存", false);
+  }, 1800);
+}
+
+function setButtonState(button, label, disabled) {
+  button.textContent = label;
+  button.disabled = disabled;
+}
+
+async function extractPostData(article) {
+  const tweetId = resolveTweetIdFromArticle(article);
   if (!tweetId) {
-    throw new Error("URL から tweet_id を取得できませんでした。");
+    throw new Error("tweet_id を取得できませんでした。");
   }
 
-  const article = await waitForTargetArticle(tweetId, 8000);
-  if (!article) {
-    throw new Error("投稿の DOM を特定できませんでした。");
-  }
-
+  const url = resolveCanonicalUrl(article, tweetId);
   const timeEl = article.querySelector("time");
   const createdAt = timeEl?.getAttribute("datetime") || "";
   if (!createdAt) {
@@ -88,15 +219,18 @@ async function extractPostData() {
     throw new Error("投稿本文が見つかりませんでした。");
   }
 
-  const handleEl = article.querySelector(`a[href*="/status/${tweetId}"]`) || article.querySelector("a[href*='/status/']");
+  const handleEl =
+    article.querySelector(`a[href*="/status/${tweetId}"]`) ||
+    article.querySelector("a[href*='/status/']");
   const handle = resolveHandle(handleEl?.getAttribute("href"));
+
   const nameEl = article.querySelector("div[dir='ltr'] span");
   const authorName = nameEl?.textContent?.trim() || handle;
 
   const imageUrls = [...article.querySelectorAll("img")]
     .map((img) => img.getAttribute("src") || "")
     .filter((src) => src.includes("twimg.com/media"))
-    .map((imgUrl) => ({ url: imgUrl }))
+    .map((imageUrl) => ({ url: imageUrl }))
     .slice(0, 10);
 
   return {
@@ -114,34 +248,55 @@ async function extractPostData() {
   };
 }
 
-function resolveTweetId(url) {
-  const match = url.match(/status\/(\d+)/);
-  return match ? match[1] : "";
-}
-
-async function waitForTargetArticle(tweetId, timeoutMs) {
-  const startedAt = Date.now();
-  while (Date.now() - startedAt < timeoutMs) {
-    const article = findTargetArticle(tweetId);
-    if (article) return article;
-    await new Promise((resolve) => setTimeout(resolve, 200));
+function resolveTweetIdFromArticle(article) {
+  const timeLink = article.querySelector("a[href*='/status/']");
+  const href = timeLink?.getAttribute("href") || "";
+  const match = href.match(/status\/(\d+)/);
+  if (match) {
+    return match[1];
   }
-  return null;
-}
 
-function findTargetArticle(tweetId) {
-  const links = [...document.querySelectorAll(`a[href*="/status/${tweetId}"]`)];
+  const links = [...article.querySelectorAll("a[href*='/status/']")];
   for (const link of links) {
-    const article = link.closest("article");
-    if (article) return article;
+    const candidate = link.getAttribute("href") || "";
+    const found = candidate.match(/status\/(\d+)/);
+    if (found) {
+      return found[1];
+    }
   }
-  return document.querySelector("article[data-testid='tweet']") || document.querySelector("article");
+
+  return "";
+}
+
+function resolveCanonicalUrl(article, tweetId) {
+  const statusLink =
+    article.querySelector(`a[href*="/status/${tweetId}"]`) ||
+    article.querySelector("a[href*='/status/']");
+  const href = statusLink?.getAttribute("href") || `/i/status/${tweetId}`;
+  return new URL(href, location.origin).toString();
+}
+
+function findActionBar(article) {
+  const groups = article.querySelectorAll("div[role='group']");
+  for (const group of groups) {
+    if (group.querySelector("button[data-testid='reply']") || group.querySelector("button[data-testid='like']")) {
+      return group;
+    }
+  }
+
+  return article.querySelector("div[role='group']");
 }
 
 function resolveHandle(href) {
-  if (!href) return "@unknown";
+  if (!href) {
+    return "@unknown";
+  }
+
   const match = href.match(/^\/([^/]+)\/status\//);
-  if (!match) return "@unknown";
+  if (!match) {
+    return "@unknown";
+  }
+
   return `@${match[1]}`;
 }
 
@@ -186,7 +341,9 @@ async function showConfirmDialog(title, message, detailText) {
 
 function createModal(title, detailText, isError, withCancel) {
   const existing = document.getElementById(MODAL_ID);
-  if (existing) existing.remove();
+  if (existing) {
+    existing.remove();
+  }
 
   const root = document.createElement("div");
   root.id = MODAL_ID;
@@ -266,7 +423,9 @@ function createModal(title, detailText, isError, withCancel) {
   const cancelButton = withCancel ? createButton("キャンセル", "#e4e7ec", "#111") : null;
 
   footer.appendChild(copyButton);
-  if (cancelButton) footer.appendChild(cancelButton);
+  if (cancelButton) {
+    footer.appendChild(cancelButton);
+  }
   footer.appendChild(okButton);
 
   panel.appendChild(header);
