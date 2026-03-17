@@ -63,6 +63,14 @@ app.MapPost("/api/v1/auth/bootstrap", async () =>
     return Results.Ok(new { ok = true, token });
 });
 
+app.MapGet("/api/v1/tags", async (CancellationToken ct) =>
+{
+    await using var conn = Db.Open(appConfig.DatabasePath);
+    await conn.OpenAsync(ct);
+    var tags = await TagCatalog.LoadAsync(conn, Path.GetFullPath(appConfig.StorageRootPath), ct);
+    return Results.Ok(new { ok = true, tags });
+});
+
 app.MapPost("/api/v1/posts", async (
     SavePostRequest request,
     IHttpClientFactory httpClientFactory,
@@ -316,6 +324,7 @@ sealed record Author(string handle, string name);
 sealed record ImageInput(string url);
 sealed record VideoPlaylistInput(string m3u8_url);
 sealed record MediaRow(string media_type, string? original_url, string local_path, int sort_order);
+sealed record TagCatalogResponseItem(string name, int count);
 
 sealed record ApiError(bool ok, string error_code, string message, bool can_retry = false)
 {
@@ -529,6 +538,23 @@ static class Db
         return result is not null;
     }
 
+    public static async Task<List<string>> LoadTagNamesAsync(SqliteConnection conn, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT name FROM tags ORDER BY name COLLATE NOCASE ASC;";
+        var list = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (reader.IsDBNull(0)) continue;
+            var name = reader.GetString(0);
+            if (string.IsNullOrWhiteSpace(name)) continue;
+            list.Add(name);
+        }
+
+        return list;
+    }
+
     public static async Task<long> UpsertAuthorAsync(SqliteConnection conn, SqliteTransaction tx, string handle, string name, DateTimeOffset now, CancellationToken ct)
     {
         await using (var upsert = conn.CreateCommand())
@@ -620,6 +646,71 @@ ON CONFLICT(post_id, tag_id) DO NOTHING;";
         cmd.Parameters.AddWithValue("$tag_id", tagId);
         cmd.Parameters.AddWithValue("$now", now.ToString("o"));
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+}
+
+static class TagCatalog
+{
+    public static async Task<List<TagCatalogResponseItem>> LoadAsync(SqliteConnection conn, string archiveRoot, CancellationToken ct)
+    {
+        var counts = LoadTagCountsFromArchive(archiveRoot);
+        var tagNames = await Db.LoadTagNamesAsync(conn, ct);
+
+        foreach (var name in tagNames)
+        {
+            if (!counts.ContainsKey(name))
+            {
+                counts[name] = 0;
+            }
+        }
+
+        return counts
+            .OrderByDescending(x => x.Value)
+            .ThenBy(x => x.Key, StringComparer.CurrentCulture)
+            .Select(x => new TagCatalogResponseItem(x.Key, x.Value))
+            .ToList();
+    }
+
+    private static Dictionary<string, int> LoadTagCountsFromArchive(string archiveRoot)
+    {
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        if (!Directory.Exists(archiveRoot))
+        {
+            return counts;
+        }
+
+        foreach (var dir in Directory.GetDirectories(archiveRoot, "tweet-*", SearchOption.TopDirectoryOnly))
+        {
+            var metaPath = Path.Combine(dir, "meta.json");
+            if (!File.Exists(metaPath))
+            {
+                continue;
+            }
+
+            try
+            {
+                var meta = JsonSerializer.Deserialize<MetaJson>(File.ReadAllText(metaPath));
+                if (meta?.tags is null)
+                {
+                    continue;
+                }
+
+                foreach (var tag in meta.tags
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Select(TagUtil.Normalize)
+                    .Where(x => !string.IsNullOrWhiteSpace(x))
+                    .Distinct(StringComparer.OrdinalIgnoreCase))
+                {
+                    counts[tag] = counts.TryGetValue(tag, out var current) ? current + 1 : 1;
+                }
+            }
+            catch
+            {
+                // Ignore broken files.
+            }
+        }
+
+        return counts;
     }
 }
 

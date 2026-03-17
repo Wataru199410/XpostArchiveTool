@@ -31,10 +31,33 @@ chrome.webRequest.onBeforeRequest.addListener(
 );
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== "SAVE_POST") return;
+  if (message?.type !== "SAVE_POST" && message?.type !== "GET_TAG_CATALOG") return;
 
   (async () => {
     try {
+      if (message?.type === "GET_TAG_CATALOG") {
+        const apiBase = await resolveApiBase();
+        let token = await loadOrBootstrapToken(apiBase);
+        let response = await fetchTagCatalog(apiBase, token);
+        if (response.status === 401) {
+          token = await loadOrBootstrapToken(apiBase, true);
+          response = await fetchTagCatalog(apiBase, token);
+        }
+
+        const body = await safeJson(response);
+        sendResponse({
+          ok: response.ok,
+          status: response.status,
+          body: {
+            ...body,
+            debug: {
+              api_base: apiBase
+            }
+          }
+        });
+        return;
+      }
+
       const tabId = sender.tab?.id;
       if (typeof tabId !== "number") {
         throw new Error("TAB_ID_MISSING");
@@ -186,6 +209,15 @@ async function postSave(payload, token, apiBase) {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+async function fetchTagCatalog(apiBase, token) {
+  return await fetch(`${apiBase}/tags`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
 }
 
 async function safeJson(response) {
