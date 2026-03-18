@@ -7,3 +7,6 @@ server/XArchive/
 node_modules/
 XArchive_e2e/
 data_e2e/
+data/archive.db
+data/auth_token.txt
+XArchive/
