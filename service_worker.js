@@ -31,7 +31,7 @@ chrome.webRequest.onBeforeRequest.addListener(
 );
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.type !== "SAVE_POST" && message?.type !== "GET_TAG_CATALOG") return;
+  if (message?.type !== "SAVE_POST" && message?.type !== "GET_TAG_CATALOG" && message?.type !== "GET_POST_STATUS" && message?.type !== "UPDATE_POST") return;
 
   (async () => {
     try {
@@ -52,6 +52,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             ...body,
             debug: {
               api_base: apiBase
+            }
+          }
+        });
+        return;
+      }
+
+      if (message?.type === "GET_POST_STATUS") {
+        const apiBase = await resolveApiBase();
+        let token = await loadOrBootstrapToken(apiBase);
+        let response = await fetchPostStatus(apiBase, token, message.tweetId);
+        if (response.status === 401) {
+          token = await loadOrBootstrapToken(apiBase, true);
+          response = await fetchPostStatus(apiBase, token, message.tweetId);
+        }
+
+        const body = await safeJson(response);
+        sendResponse({
+          ok: response.ok,
+          status: response.status,
+          body: {
+            ...body,
+            debug: {
+              api_base: apiBase
+            }
+          }
+        });
+        return;
+      }
+
+      if (message?.type === "UPDATE_POST") {
+        const apiBase = await resolveApiBase();
+        let token = await loadOrBootstrapToken(apiBase);
+        let response = await updatePost(message.payload, token, apiBase);
+        if (response.status === 401) {
+          token = await loadOrBootstrapToken(apiBase, true);
+          response = await updatePost(message.payload, token, apiBase);
+        }
+
+        const body = await safeJson(response);
+        sendResponse({
+          ok: response.ok,
+          status: response.status,
+          body: {
+            ...body,
+            debug: {
+              api_base: apiBase,
+              payload_bytes: byteLengthUtf8(JSON.stringify(message.payload || {}))
             }
           }
         });
@@ -217,6 +264,26 @@ async function fetchTagCatalog(apiBase, token) {
     headers: {
       Authorization: `Bearer ${token}`
     }
+  });
+}
+
+async function fetchPostStatus(apiBase, token, tweetId) {
+  return await fetch(`${apiBase}/posts/${encodeURIComponent(tweetId)}`, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${token}`
+    }
+  });
+}
+
+async function updatePost(payload, token, apiBase) {
+  return await fetch(`${apiBase}/posts/${encodeURIComponent(payload?.tweet_id || "")}`, {
+    method: "PUT",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`
+    },
+    body: JSON.stringify(payload)
   });
 }
 

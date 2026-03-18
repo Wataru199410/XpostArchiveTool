@@ -71,6 +71,24 @@ app.MapGet("/api/v1/tags", async (CancellationToken ct) =>
     return Results.Ok(new { ok = true, tags });
 });
 
+app.MapGet("/api/v1/posts/{tweetId}", async (string tweetId, CancellationToken ct) =>
+{
+    if (string.IsNullOrWhiteSpace(tweetId))
+    {
+        return Results.BadRequest(ApiError.BadRequest("TWEET_ID_REQUIRED", "tweet_id は必須です。"));
+    }
+
+    await using var conn = Db.Open(appConfig.DatabasePath);
+    await conn.OpenAsync(ct);
+    var existing = await PostStore.LoadByTweetIdAsync(conn, tweetId, ct);
+    if (existing is null)
+    {
+        return Results.Ok(new { ok = true, exists = false });
+    }
+
+    return Results.Ok(new { ok = true, exists = true, post = existing });
+});
+
 app.MapPost("/api/v1/posts", async (
     SavePostRequest request,
     IHttpClientFactory httpClientFactory,
@@ -207,6 +225,94 @@ app.MapPost("/api/v1/posts", async (
     }
 });
 
+app.MapPut("/api/v1/posts/{tweetId}", async (
+    string tweetId,
+    UpdatePostRequest request,
+    CancellationToken ct) =>
+{
+    if (!string.Equals(tweetId, request.tweet_id, StringComparison.Ordinal))
+    {
+        return Results.BadRequest(ApiError.BadRequest("TWEET_ID_MISMATCH", "URL の tweet_id と本文の tweet_id が一致しません。"));
+    }
+
+    var validationError = ValidateUpdateRequest(request);
+    if (validationError is not null)
+    {
+        return Results.BadRequest(validationError);
+    }
+
+    if (!DateTimeOffset.TryParse(request.created_at, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var createdAt))
+    {
+        return Results.BadRequest(ApiError.BadRequest("CREATED_AT_INVALID", "created_at は ISO 8601 形式で指定してください。"));
+    }
+
+    await using var conn = Db.Open(appConfig.DatabasePath);
+    await conn.OpenAsync(ct);
+    var existing = await PostStore.LoadByTweetIdAsync(conn, tweetId, ct);
+    if (existing is null)
+    {
+        return Results.NotFound(ApiError.BadRequest("POST_NOT_FOUND", "保存済み投稿が見つかりません。"));
+    }
+
+    if (!Directory.Exists(existing.dir_path))
+    {
+        return Results.NotFound(ApiError.BadRequest("POST_DIR_NOT_FOUND", "保存済み投稿のディレクトリが見つかりません。"));
+    }
+
+    var metaPath = Path.Combine(existing.dir_path, "meta.json");
+    if (!File.Exists(metaPath))
+    {
+        return Results.NotFound(ApiError.BadRequest("META_NOT_FOUND", "meta.json が見つかりません。"));
+    }
+
+    try
+    {
+        var normalizedTags = request.tags
+            .Select(TagUtil.Normalize)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        var authorId = await Db.UpsertAuthorAsync(conn, tx, request.author.handle, request.author.name, DateTimeOffset.Now, ct);
+        await Db.UpdatePostAsync(conn, tx, existing.id, request.url, authorId, createdAt, request.text, request.note, ct);
+        await Db.ReplacePostTagsAsync(conn, tx, existing.id, normalizedTags, DateTimeOffset.Now, ct);
+
+        var meta = JsonSerializer.Deserialize<MetaJson>(await File.ReadAllTextAsync(metaPath, ct));
+        if (meta is null)
+        {
+            return Results.BadRequest(ApiError.BadRequest("META_INVALID", "meta.json を読み込めませんでした。"));
+        }
+
+        var updatedMeta = new MetaJson(
+            request.tweet_id,
+            request.url,
+            new MetaAuthor(request.author.handle, request.author.name),
+            request.created_at,
+            request.text,
+            existing.saved_at,
+            normalizedTags,
+            request.note,
+            meta.media
+        );
+
+        await File.WriteAllTextAsync(metaPath, JsonSerializer.Serialize(updatedMeta, JsonOptions.Pretty), ct);
+        await tx.CommitAsync(ct);
+
+        return Results.Ok(new
+        {
+            ok = true,
+            updated = true,
+            tweet_id = request.tweet_id,
+            dir_path = existing.dir_path
+        });
+    }
+    catch (Exception ex)
+    {
+        return Results.BadRequest(ApiError.BadRequest("UPDATE_FAILED", ex.ToString()));
+    }
+});
+
 app.Run($"http://{appConfig.Host}:{appConfig.Port}");
 
 static ApiError? ValidateRequest(SavePostRequest request)
@@ -241,6 +347,20 @@ static ApiError? ValidateRequest(SavePostRequest request)
         }
     }
 
+    return null;
+}
+
+static ApiError? ValidateUpdateRequest(UpdatePostRequest request)
+{
+    if (request.tags is null) return ApiError.BadRequest("TAGS_REQUIRED", "tags は空配列で送信してください。");
+    if (string.IsNullOrWhiteSpace(request.tweet_id)) return ApiError.BadRequest("TWEET_ID_REQUIRED", "tweet_id は必須です。");
+    if (!Regex.IsMatch(request.tweet_id, @"^\d+$")) return ApiError.BadRequest("TWEET_ID_INVALID", "tweet_id は数値のみ指定してください。");
+    if (string.IsNullOrWhiteSpace(request.url)) return ApiError.BadRequest("URL_REQUIRED", "url は必須です。");
+    if (string.IsNullOrWhiteSpace(request.author.handle)) return ApiError.BadRequest("AUTHOR_HANDLE_REQUIRED", "author.handle は必須です。");
+    if (string.IsNullOrWhiteSpace(request.author.name)) return ApiError.BadRequest("AUTHOR_NAME_REQUIRED", "author.name は必須です。");
+    if (string.IsNullOrWhiteSpace(request.created_at)) return ApiError.BadRequest("CREATED_AT_REQUIRED", "created_at は必須です。");
+    if (string.IsNullOrWhiteSpace(request.text)) return ApiError.BadRequest("TEXT_REQUIRED", "text は必須です。");
+    if (!UrlUtil.IsAllowedPostUrl(request.url)) return ApiError.BadRequest("URL_INVALID", "url は X のポスト URL を指定してください。");
     return null;
 }
 
@@ -320,11 +440,27 @@ sealed record SavePostRequest(
     }
 }
 
+sealed record UpdatePostRequest(
+    string tweet_id,
+    string url,
+    Author author,
+    string created_at,
+    string text,
+    List<string> tags,
+    string? note
+)
+{
+    public UpdatePostRequest() : this("", "", new Author("", ""), "", "", [], null)
+    {
+    }
+}
+
 sealed record Author(string handle, string name);
 sealed record ImageInput(string url);
 sealed record VideoPlaylistInput(string m3u8_url);
 sealed record MediaRow(string media_type, string? original_url, string local_path, int sort_order);
 sealed record TagCatalogResponseItem(string name, int count);
+sealed record ExistingPostResponse(long id, string tweet_id, string url, string created_at, string text, string? note, string saved_at, string dir_path, Author author, List<string> tags);
 
 sealed record ApiError(bool ok, string error_code, string message, bool can_retry = false)
 {
@@ -647,6 +783,44 @@ ON CONFLICT(post_id, tag_id) DO NOTHING;";
         cmd.Parameters.AddWithValue("$now", now.ToString("o"));
         await cmd.ExecuteNonQueryAsync(ct);
     }
+
+    public static async Task UpdatePostAsync(SqliteConnection conn, SqliteTransaction tx, long postId, string url, long authorId, DateTimeOffset createdAt, string text, string? note, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = @"
+UPDATE posts
+SET url = $url,
+    author_id = $author_id,
+    created_at = $created_at,
+    text = $text,
+    note = $note
+WHERE id = $id;";
+        cmd.Parameters.AddWithValue("$id", postId);
+        cmd.Parameters.AddWithValue("$url", url);
+        cmd.Parameters.AddWithValue("$author_id", authorId);
+        cmd.Parameters.AddWithValue("$created_at", createdAt.ToString("o"));
+        cmd.Parameters.AddWithValue("$text", text);
+        cmd.Parameters.AddWithValue("$note", (object?)note ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public static async Task ReplacePostTagsAsync(SqliteConnection conn, SqliteTransaction tx, long postId, List<string> tags, DateTimeOffset now, CancellationToken ct)
+    {
+        await using (var delete = conn.CreateCommand())
+        {
+            delete.Transaction = tx;
+            delete.CommandText = "DELETE FROM post_tags WHERE post_id = $post_id";
+            delete.Parameters.AddWithValue("$post_id", postId);
+            await delete.ExecuteNonQueryAsync(ct);
+        }
+
+        foreach (var tag in tags)
+        {
+            var tagId = await UpsertTagAsync(conn, tx, tag, now, ct);
+            await InsertPostTagAsync(conn, tx, postId, tagId, now, ct);
+        }
+    }
 }
 
 static class TagCatalog
@@ -711,6 +885,66 @@ static class TagCatalog
         }
 
         return counts;
+    }
+}
+
+static class PostStore
+{
+    public static async Task<ExistingPostResponse?> LoadByTweetIdAsync(SqliteConnection conn, string tweetId, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+SELECT p.id, p.tweet_id, p.url, p.created_at, p.text, p.note, p.saved_at, p.dir_path, a.handle, a.name
+FROM posts p
+JOIN authors a ON a.id = p.author_id
+WHERE p.tweet_id = $tweet_id
+LIMIT 1;";
+        cmd.Parameters.AddWithValue("$tweet_id", tweetId);
+
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        if (!await reader.ReadAsync(ct))
+        {
+            return null;
+        }
+
+        var postId = reader.GetInt64(0);
+        var tags = await LoadPostTagsAsync(conn, postId, ct);
+
+        return new ExistingPostResponse(
+            postId,
+            reader.GetString(1),
+            reader.GetString(2),
+            reader.GetString(3),
+            reader.GetString(4),
+            reader.IsDBNull(5) ? null : reader.GetString(5),
+            reader.GetString(6),
+            reader.GetString(7),
+            new Author(reader.GetString(8), reader.GetString(9)),
+            tags);
+    }
+
+    private static async Task<List<string>> LoadPostTagsAsync(SqliteConnection conn, long postId, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+SELECT t.name
+FROM post_tags pt
+JOIN tags t ON t.id = pt.tag_id
+WHERE pt.post_id = $post_id
+ORDER BY t.name COLLATE NOCASE ASC;";
+        cmd.Parameters.AddWithValue("$post_id", postId);
+
+        var tags = new List<string>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (!reader.IsDBNull(0))
+            {
+                tags.Add(reader.GetString(0));
+            }
+        }
+
+        return tags;
     }
 }
 
