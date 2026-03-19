@@ -1,9 +1,5 @@
-using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -13,14 +9,13 @@ namespace XPostArchive.Desktop;
 
 public partial class MainWindow : Window
 {
-    private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNameCaseInsensitive = true };
     private static readonly Brush ErrorBrush = new SolidColorBrush(Color.FromRgb(180, 35, 24));
     private static readonly Brush NeutralBrush = new SolidColorBrush(Color.FromRgb(107, 114, 128));
     private static readonly Brush SuccessBrush = new SolidColorBrush(Color.FromRgb(22, 101, 52));
 
-    private List<PostListItem> _allItems = new();
-    private List<TagCatalogItem> _tagCatalog = new();
-    private readonly List<EditableTagItem> _editableTags = new();
+    private List<PostListItem> _allItems = [];
+    private List<TagCatalogItem> _tagCatalog = [];
+    private readonly List<EditableTagItem> _editableTags = [];
     private string? _selectedTag;
     private PostListItem? _selectedItem;
     private SortOption _selectedSort = SortOption.SavedAtDesc;
@@ -35,10 +30,9 @@ public partial class MainWindow : Window
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
         var result = await App.ApiManager.EnsureStartedAsync();
-
         if (!result.ok)
         {
-            MessageBox.Show(result.message, "API 起動エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(result.message, "API Error", MessageBoxButton.OK, MessageBoxImage.Error);
         }
 
         LoadSavedPosts();
@@ -101,7 +95,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetMemoStatus("メモはまだ保存されていません。");
+        SetMemoStatus("Memo has unsaved changes.");
     }
 
     private void TagFilterList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -109,12 +103,12 @@ public partial class MainWindow : Window
         if (TagFilterList.SelectedItem is not TagFilterItem tag)
         {
             _selectedTag = null;
-            TagSummaryText.Text = "すべての投稿を表示中";
+            TagSummaryText.Text = "Showing all posts";
         }
         else
         {
             _selectedTag = tag.Key == "__ALL__" ? null : tag.Key;
-            TagSummaryText.Text = _selectedTag is null ? "すべての投稿を表示中" : $"タグ: {_selectedTag}";
+            TagSummaryText.Text = _selectedTag is null ? "Showing all posts" : $"Tag: {_selectedTag}";
         }
 
         ApplyFilter();
@@ -149,8 +143,7 @@ public partial class MainWindow : Window
     private void ManageTags_Click(object sender, RoutedEventArgs e)
     {
         var selectedDirPath = _selectedItem?.DirPath;
-        var archiveRoot = TagCatalogStore.ResolveArchiveRootPath();
-        var window = new TagManagementWindow(archiveRoot) { Owner = this };
+        var window = new TagManagementWindow(TagCatalogStore.ResolveArchiveRootPath()) { Owner = this };
         window.ShowDialog();
 
         LoadSavedPosts();
@@ -176,14 +169,10 @@ public partial class MainWindow : Window
             return;
         }
 
-        var window = new TagEditWindow(
-            _editableTags.Select(x => x.Name).ToList(),
-            _tagCatalog,
-            ApplyTagsFromEditor)
+        var window = new TagEditWindow(_editableTags.Select(x => x.Name).ToList(), _tagCatalog, ApplyTagsFromEditor)
         {
             Owner = this
         };
-
         window.ShowDialog();
     }
 
@@ -206,75 +195,14 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetMemoStatus("メモを保存しました。", isSuccess: true);
+        SetMemoStatus("Memo saved.", isSuccess: true);
         ShowPostDetail(updated);
     }
 
     private void LoadSavedPosts()
     {
-        var archiveRoot = TagCatalogStore.ResolveArchiveRootPath();
-        var items = new List<PostListItem>();
-
-        if (Directory.Exists(archiveRoot))
-        {
-            foreach (var dir in Directory.GetDirectories(archiveRoot, "tweet-*", SearchOption.TopDirectoryOnly))
-            {
-                var metaPath = Path.Combine(dir, "meta.json");
-                if (!File.Exists(metaPath))
-                {
-                    continue;
-                }
-
-                try
-                {
-                    var meta = JsonSerializer.Deserialize<MetaJson>(File.ReadAllText(metaPath), JsonOptions);
-                    if (meta is null)
-                    {
-                        continue;
-                    }
-
-                    var savedAtValue = DateTimeOffset.TryParse(meta.saved_at, out var savedAtDto)
-                        ? savedAtDto
-                        : (DateTimeOffset?)null;
-                    var createdAtValue = DateTimeOffset.TryParse(meta.created_at, out var createdAtDto)
-                        ? createdAtDto
-                        : (DateTimeOffset?)null;
-                    var savedAt = savedAtValue.HasValue
-                        ? savedAtValue.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
-                        : meta.saved_at;
-
-                    var mediaFiles = BuildMediaFileItems(dir, meta);
-                    var thumbnailPath = mediaFiles.FirstOrDefault(x => x.Type == "image")?.FullPath ?? string.Empty;
-
-                    items.Add(new PostListItem
-                    {
-                        SavedAt = savedAt,
-                        SavedAtSortValue = savedAtValue,
-                        CreatedAtSortValue = createdAtValue,
-                        Author = string.IsNullOrWhiteSpace(meta.author?.name)
-                            ? meta.author?.handle ?? string.Empty
-                            : $"{meta.author.name} ({meta.author.handle})",
-                        Text = meta.text ?? string.Empty,
-                        Tags = meta.tags is { Count: > 0 } ? string.Join(", ", meta.tags) : "(タグなし)",
-                        TagList = meta.tags ?? new List<string>(),
-                        TweetId = meta.tweet_id ?? string.Empty,
-                        DirPath = dir,
-                        ImageCount = meta.media?.images?.Count ?? 0,
-                        VideoCount = meta.media?.videos?.Count ?? 0,
-                        MediaFiles = mediaFiles,
-                        ThumbnailPath = thumbnailPath,
-                        Note = meta.note ?? string.Empty
-                    });
-                }
-                catch
-                {
-                    // ignore broken meta.json
-                }
-            }
-        }
-
-        _allItems = items.OrderByDescending(x => x.SavedAt).ToList();
-        _tagCatalog = TagCatalogStore.LoadCatalog(archiveRoot);
+        _allItems = DesktopArchiveStore.LoadPosts();
+        _tagCatalog = TagCatalogStore.LoadCatalog();
         BuildTagFilters();
         ApplyFilter();
     }
@@ -283,11 +211,11 @@ public partial class MainWindow : Window
     {
         var tagCounts = _tagCatalog
             .OrderByDescending(x => x.Count)
-            .ThenBy(x => x.Name)
+            .ThenBy(x => x.Name, StringComparer.CurrentCulture)
             .Select(x => new TagFilterItem { Key = x.Name, Name = x.Name, Count = x.Count })
             .ToList();
 
-        tagCounts.Insert(0, new TagFilterItem { Key = "__ALL__", Name = "すべて", Count = _allItems.Count });
+        tagCounts.Insert(0, new TagFilterItem { Key = "__ALL__", Name = "All", Count = _allItems.Count });
         TagFilterList.ItemsSource = tagCounts;
 
         var selectedIndex = 0;
@@ -324,7 +252,7 @@ public partial class MainWindow : Window
 
         var totalImages = _allItems.Sum(x => x.ImageCount);
         var totalVideos = _allItems.Sum(x => x.VideoCount);
-        ListStatsText.Text = $"{list.Count} / {_allItems.Count} 件表示  |  画像 {totalImages} 件  |  動画 {totalVideos} 件";
+        ListStatsText.Text = $"{list.Count} / {_allItems.Count} posts | images {totalImages} | videos {totalVideos}";
 
         if (_selectedItem is not null)
         {
@@ -338,24 +266,22 @@ public partial class MainWindow : Window
         }
 
         PostsCardList.SelectedItem = null;
-        ShowHomeState(list.Count == 0
-            ? "条件に一致する投稿がありません。"
-            : "左の一覧から投稿を選択してください。");
+        ShowHomeState(list.Count == 0 ? "No matching posts." : "Select a post from the list.");
     }
 
     private void ShowHomeState(string? subTitle = null)
     {
         _selectedItem = null;
-        DetailTitleText.Text = "投稿詳細";
-        DetailSubTitleText.Text = subTitle ?? "左の一覧から投稿を選択してください。";
-        DetailTweetText.Text = "一覧から投稿を選択すると、ここに本文が表示されます。";
-        DetailTagText.Text = "タグ: なし";
+        DetailTitleText.Text = "Post Detail";
+        DetailSubTitleText.Text = subTitle ?? "Select a post from the list.";
+        DetailTweetText.Text = "Post text will appear here.";
+        DetailTagText.Text = "Tags: none";
         DetailMediaList.ItemsSource = new[]
         {
             new MediaFileItem
             {
                 Type = "info",
-                Display = "投稿を選択するとメディア一覧が表示されます。",
+                Display = "Media list will appear here.",
                 FullPath = string.Empty
             }
         };
@@ -373,8 +299,8 @@ public partial class MainWindow : Window
     {
         _selectedItem = item;
         DetailTitleText.Text = item.Author;
-        DetailSubTitleText.Text = $"Tweet ID: {item.TweetId}  |  保存日時: {item.SavedAt}";
-        DetailTweetText.Text = string.IsNullOrWhiteSpace(item.Text) ? "(本文なし)" : item.Text;
+        DetailSubTitleText.Text = $"Tweet ID: {item.TweetId} | Saved: {item.SavedAt}";
+        DetailTweetText.Text = string.IsNullOrWhiteSpace(item.Text) ? "(no text)" : item.Text;
 
         _editableTags.Clear();
         foreach (var tag in item.TagList.Where(x => !string.IsNullOrWhiteSpace(x)))
@@ -395,7 +321,7 @@ public partial class MainWindow : Window
                 new MediaFileItem
                 {
                     Type = "info",
-                    Display = "この投稿に保存済みメディアはありません。",
+                    Display = "No saved media.",
                     FullPath = string.Empty
                 }
             }
@@ -406,18 +332,18 @@ public partial class MainWindow : Window
     {
         if (_selectedItem is null)
         {
-            return new TagEditSaveResult(false, "投稿が選択されていません。");
+            return new TagEditSaveResult(false, "No post selected.");
         }
 
-        if (!SaveSelectedPostChanges(tags.ToList(), _selectedItem.Note, out var updated, out var errorMessage))
+        if (!SaveSelectedPostChanges(tags.ToList(), DetailNoteTextBox.Text ?? string.Empty, out var updated, out var errorMessage))
         {
             SetTagActionStatus(errorMessage, isError: true);
             return new TagEditSaveResult(false, errorMessage);
         }
 
-        SetTagActionStatus("タグを保存しました。", isSuccess: true);
+        SetTagActionStatus("Tags saved.", isSuccess: true);
         ShowPostDetail(updated);
-        return new TagEditSaveResult(true, "タグを保存しました。");
+        return new TagEditSaveResult(true, "Tags saved.");
     }
 
     private bool SaveSelectedPostChanges(List<string> tags, string note, out PostListItem updated, out string errorMessage)
@@ -427,70 +353,20 @@ public partial class MainWindow : Window
 
         if (_selectedItem is null)
         {
-            errorMessage = "投稿が選択されていません。";
+            errorMessage = "No post selected.";
             return false;
         }
 
-        try
+        var targetDir = _selectedItem.DirPath;
+        if (!DesktopArchiveStore.SavePostChanges(targetDir, tags, note, out errorMessage))
         {
-            var metaPath = Path.Combine(_selectedItem.DirPath, "meta.json");
-            if (!File.Exists(metaPath))
-            {
-                errorMessage = "meta.json が見つかりません。";
-                return false;
-            }
-
-            var text = File.ReadAllText(metaPath);
-            var node = JsonNode.Parse(text) as JsonObject;
-            if (node is null)
-            {
-                errorMessage = "meta.json を読み込めませんでした。";
-                return false;
-            }
-
-            var normalizedTags = tags
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(x => x.Trim())
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            var originalTags = _selectedItem.TagList
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(x => x.Trim())
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-            var tagArray = new JsonArray();
-            foreach (var currentTag in normalizedTags)
-            {
-                tagArray.Add(currentTag);
-            }
-
-            TagCatalogStore.PersistTagsToDatabase(normalizedTags.Concat(originalTags));
-            node["tags"] = tagArray;
-            node["note"] = note;
-
-            var output = JsonSerializer.Serialize(
-                node,
-                new JsonSerializerOptions
-                {
-                    WriteIndented = true,
-                    TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver()
-                });
-            File.WriteAllText(metaPath, output);
-
-            var targetDir = _selectedItem.DirPath;
-            LoadSavedPosts();
-
-            updated = _allItems.FirstOrDefault(x => x.DirPath == targetDir) ?? _selectedItem;
-            PostsCardList.SelectedItem = updated;
-            return true;
-        }
-        catch (Exception ex)
-        {
-            errorMessage = ex.Message;
             return false;
         }
+
+        LoadSavedPosts();
+        updated = _allItems.FirstOrDefault(x => x.DirPath == targetDir) ?? _selectedItem;
+        PostsCardList.SelectedItem = updated;
+        return true;
     }
 
     private void DetailMediaList_MouseDoubleClick(object sender, MouseButtonEventArgs e) => OpenSelectedMedia();
@@ -538,10 +414,10 @@ public partial class MainWindow : Window
     private void RefreshTagEditor()
     {
         DetailTagItems.ItemsSource = null;
-        DetailTagItems.ItemsSource = _editableTags.OrderBy(x => x.Name).ToList();
+        DetailTagItems.ItemsSource = _editableTags.OrderBy(x => x.Name, StringComparer.CurrentCulture).ToList();
         DetailTagText.Text = _editableTags.Count == 0
-            ? "タグ: なし"
-            : $"タグ: {string.Join(", ", _editableTags.Select(x => $"#{x.Name}"))}";
+            ? "Tags: none"
+            : $"Tags: {string.Join(", ", _editableTags.Select(x => $"#{x.Name}"))}";
     }
 
     private void SetTagActionStatus(string text, bool isError = false, bool isSuccess = false)
@@ -565,49 +441,16 @@ public partial class MainWindow : Window
         InputMethod.SetPreferredImeState(textBox, InputMethodState.DoNotCare);
     }
 
-    private static List<MediaFileItem> BuildMediaFileItems(string dirPath, MetaJson meta)
-    {
-        var list = new List<MediaFileItem>();
-
-        if (meta.media?.images is not null)
-        {
-            foreach (var image in meta.media.images)
-            {
-                list.Add(new MediaFileItem
-                {
-                    Type = "image",
-                    Display = $"[画像] {image.local_path}",
-                    FullPath = Path.GetFullPath(Path.Combine(dirPath, image.local_path))
-                });
-            }
-        }
-
-        if (meta.media?.videos is not null)
-        {
-            foreach (var video in meta.media.videos)
-            {
-                list.Add(new MediaFileItem
-                {
-                    Type = "video",
-                    Display = $"[動画] {video.local_path}",
-                    FullPath = Path.GetFullPath(Path.Combine(dirPath, video.local_path))
-                });
-            }
-        }
-
-        return list;
-    }
-
     private void InitializeSortOptions()
     {
         SortOrderComboBox.ItemsSource = new[]
         {
-            new SortOptionItem("保存日時: 新しい順", SortOption.SavedAtDesc),
-            new SortOptionItem("保存日時: 古い順", SortOption.SavedAtAsc),
-            new SortOptionItem("投稿日時: 新しい順", SortOption.CreatedAtDesc),
-            new SortOptionItem("投稿日時: 古い順", SortOption.CreatedAtAsc),
-            new SortOptionItem("投稿者名: A-Z", SortOption.AuthorAsc),
-            new SortOptionItem("投稿者名: Z-A", SortOption.AuthorDesc)
+            new SortOptionItem("Saved: Newest", SortOption.SavedAtDesc),
+            new SortOptionItem("Saved: Oldest", SortOption.SavedAtAsc),
+            new SortOptionItem("Posted: Newest", SortOption.CreatedAtDesc),
+            new SortOptionItem("Posted: Oldest", SortOption.CreatedAtAsc),
+            new SortOptionItem("Author: A-Z", SortOption.AuthorAsc),
+            new SortOptionItem("Author: Z-A", SortOption.AuthorDesc)
         };
         SortOrderComboBox.SelectedIndex = 0;
     }
@@ -635,13 +478,13 @@ public sealed class PostListItem
     public string Author { get; init; } = string.Empty;
     public string Text { get; init; } = string.Empty;
     public string Tags { get; init; } = string.Empty;
-    public List<string> TagList { get; init; } = new();
+    public List<string> TagList { get; init; } = [];
     public string TweetId { get; init; } = string.Empty;
     public string DirPath { get; init; } = string.Empty;
     public int ImageCount { get; init; }
     public int VideoCount { get; init; }
     public string ThumbnailPath { get; init; } = string.Empty;
-    public List<MediaFileItem> MediaFiles { get; init; } = new();
+    public List<MediaFileItem> MediaFiles { get; init; } = [];
     public string Note { get; init; } = string.Empty;
 }
 
@@ -681,20 +524,3 @@ public enum SortOption
     AuthorAsc,
     AuthorDesc
 }
-
-public sealed record MetaJson(
-    string tweet_id,
-    string url,
-    MetaAuthor author,
-    string created_at,
-    string text,
-    string saved_at,
-    List<string> tags,
-    string? note,
-    MetaMedia media
-);
-
-public sealed record MetaAuthor(string handle, string name);
-public sealed record MetaMedia(List<MetaImage> images, List<MetaVideo> videos);
-public sealed record MetaImage(string original_url, string local_path);
-public sealed record MetaVideo(string playlist_url, string local_path);

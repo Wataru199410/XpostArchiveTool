@@ -3,46 +3,35 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 
 var builder = WebApplication.CreateBuilder(args);
-builder.WebHost.ConfigureKestrel(options =>
-{
-    options.Limits.MaxRequestBodySize = 50 * 1024 * 1024; // 50 MB
-});
-
+builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 50 * 1024 * 1024);
 var appConfig = AppConfig.From(builder.Configuration);
 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(appConfig.DatabasePath))!);
 Directory.CreateDirectory(Path.GetDirectoryName(Path.GetFullPath(appConfig.TokenFilePath))!);
 Directory.CreateDirectory(Path.GetFullPath(appConfig.StorageRootPath));
-
 await Db.InitializeAsync(appConfig.DatabasePath, Path.Combine(AppContext.BaseDirectory, "schema.sql"));
-
 builder.Services.AddSingleton(appConfig);
 builder.Services.AddHttpClient();
-
 var app = builder.Build();
 
 app.Use(async (context, next) =>
 {
     var path = context.Request.Path.Value ?? string.Empty;
-    if (path.Equals("/api/v1/health", StringComparison.OrdinalIgnoreCase) ||
-        path.Equals("/api/v1/auth/bootstrap", StringComparison.OrdinalIgnoreCase))
+    if (path.Equals("/api/v1/health", StringComparison.OrdinalIgnoreCase) || path.Equals("/api/v1/auth/bootstrap", StringComparison.OrdinalIgnoreCase))
     {
         await next();
         return;
     }
-
     var authHeader = context.Request.Headers.Authorization.ToString();
     if (!authHeader.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
     {
         context.Response.StatusCode = StatusCodes.Status401Unauthorized;
-        await context.Response.WriteAsJsonAsync(ApiError.Unauthorized("Authorizationヘッダがありません。"));
+        await context.Response.WriteAsJsonAsync(ApiError.Unauthorized("Authorization ヘッダーがありません。"));
         return;
     }
-
     var token = authHeader[7..].Trim();
     var expected = await Auth.LoadOrCreateTokenAsync(appConfig.TokenFilePath);
     if (!CryptographicOperations.FixedTimeEquals(Encoding.UTF8.GetBytes(token), Encoding.UTF8.GetBytes(expected)))
@@ -51,330 +40,167 @@ app.Use(async (context, next) =>
         await context.Response.WriteAsJsonAsync(ApiError.Unauthorized("トークンが不正です。"));
         return;
     }
-
     await next();
 });
 
 app.MapGet("/api/v1/health", () => Results.Ok(new { ok = true, service = "x-post-archive-api" }));
-
-app.MapPost("/api/v1/auth/bootstrap", async () =>
-{
-    var token = await Auth.LoadOrCreateTokenAsync(appConfig.TokenFilePath);
-    return Results.Ok(new { ok = true, token });
-});
-
+app.MapPost("/api/v1/auth/bootstrap", async () => Results.Ok(new { ok = true, token = await Auth.LoadOrCreateTokenAsync(appConfig.TokenFilePath) }));
 app.MapGet("/api/v1/tags", async (CancellationToken ct) =>
 {
     await using var conn = Db.Open(appConfig.DatabasePath);
     await conn.OpenAsync(ct);
-    var tags = await TagCatalog.LoadAsync(conn, Path.GetFullPath(appConfig.StorageRootPath), ct);
-    return Results.Ok(new { ok = true, tags });
+    return Results.Ok(new { ok = true, tags = await TagCatalog.LoadAsync(conn, ct) });
 });
-
 app.MapGet("/api/v1/posts/{tweetId}", async (string tweetId, CancellationToken ct) =>
 {
-    if (string.IsNullOrWhiteSpace(tweetId))
-    {
-        return Results.BadRequest(ApiError.BadRequest("TWEET_ID_REQUIRED", "tweet_id は必須です。"));
-    }
-
+    if (string.IsNullOrWhiteSpace(tweetId)) return Results.BadRequest(ApiError.BadRequest("TWEET_ID_REQUIRED", "tweet_id は必須です。"));
     await using var conn = Db.Open(appConfig.DatabasePath);
     await conn.OpenAsync(ct);
     var existing = await PostStore.LoadByTweetIdAsync(conn, tweetId, ct);
-    if (existing is null)
-    {
-        return Results.Ok(new { ok = true, exists = false });
-    }
-
-    return Results.Ok(new { ok = true, exists = true, post = existing });
+    return existing is null ? Results.Ok(new { ok = true, exists = false }) : Results.Ok(new { ok = true, exists = true, post = existing });
 });
-
-app.MapPost("/api/v1/posts", async (
-    SavePostRequest request,
-    IHttpClientFactory httpClientFactory,
-    CancellationToken ct) =>
+app.MapPost("/api/v1/posts", async (SavePostRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
 {
     var validationError = ValidateRequest(request);
-    if (validationError is not null)
-    {
-        return Results.BadRequest(validationError);
-    }
-
+    if (validationError is not null) return Results.BadRequest(validationError);
     if (!DateTimeOffset.TryParse(request.created_at, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var createdAt))
-    {
-        return Results.BadRequest(ApiError.BadRequest("CREATED_AT_INVALID", "created_at はISO 8601形式で指定してください。"));
-    }
-
+        return Results.BadRequest(ApiError.BadRequest("CREATED_AT_INVALID", "created_at は ISO 8601 形式で指定してください。"));
     var savedAt = DateTimeOffset.Now;
-    var postDir = Path.Combine(Path.GetFullPath(appConfig.StorageRootPath), $"tweet-{request.tweet_id}");
-    if (Directory.Exists(postDir))
-    {
-        return Results.Conflict(ApiError.Conflict("POST_ALREADY_EXISTS", "同じtweet_idは既に保存済みです。"));
-    }
-
+    var storageRoot = Path.GetFullPath(appConfig.StorageRootPath);
+    var postDir = Path.Combine(storageRoot, $"tweet-{request.tweet_id}");
+    var stagingDir = Path.Combine(storageRoot, ".staging", $"tweet-{request.tweet_id}-{Guid.NewGuid():N}");
+    var finalDirCreated = false;
+    if (Directory.Exists(postDir)) return Results.Conflict(ApiError.Conflict("POST_ALREADY_EXISTS", "同じ tweet_id は既に保存済みです。"));
     await using var conn = Db.Open(appConfig.DatabasePath);
     await conn.OpenAsync(ct);
-
-    var exists = await Db.PostExistsAsync(conn, request.tweet_id, ct);
-    if (exists)
-    {
-        return Results.Conflict(ApiError.Conflict("POST_ALREADY_EXISTS", "同じtweet_idは既に保存済みです。"));
-    }
-
-    Directory.CreateDirectory(postDir);
-    Directory.CreateDirectory(Path.Combine(postDir, "images"));
-    Directory.CreateDirectory(Path.Combine(postDir, "videos"));
-
-    var downloadedImages = new List<MediaRow>();
-    var downloadedVideos = new List<MediaRow>();
+    if (await Db.PostExistsAsync(conn, request.tweet_id, ct)) return Results.Conflict(ApiError.Conflict("POST_ALREADY_EXISTS", "同じ tweet_id は既に保存済みです。"));
+    Directory.CreateDirectory(Path.Combine(stagingDir, "images"));
+    Directory.CreateDirectory(Path.Combine(stagingDir, "videos"));
     try
     {
-        var screenshotPath = Path.Combine(postDir, "screenshot.png");
-        var screenshotBytes = DecodeDataUrlPng(request.screenshot_base64);
-        await File.WriteAllBytesAsync(screenshotPath, screenshotBytes, ct);
-
+        await File.WriteAllBytesAsync(Path.Combine(stagingDir, "screenshot.png"), DecodeDataUrlPng(request.screenshot_base64), ct);
         var httpClient = httpClientFactory.CreateClient();
         httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("XPostArchive/1.0");
-
+        var images = new List<MediaRow>();
+        var videos = new List<MediaRow>();
         for (var i = 0; i < request.images.Count; i++)
         {
             var originalUrl = request.images[i].url;
             var finalUrl = UrlUtil.PreferOrig(originalUrl);
-            var ext = UrlUtil.DetectExtension(finalUrl, "jpg");
-            var rel = Path.Combine("images", $"{(i + 1):000}.{ext}");
-            var abs = Path.Combine(postDir, rel);
-
-            await DownloadFileAsync(httpClient, finalUrl, abs, ct);
-            downloadedImages.Add(new MediaRow("image", originalUrl, rel.Replace('\\', '/'), i));
+            var rel = Path.Combine("images", $"{(i + 1):000}.{UrlUtil.DetectExtension(finalUrl, "jpg")}");
+            await DownloadFileAsync(httpClient, finalUrl, Path.Combine(stagingDir, rel), ct);
+            images.Add(new MediaRow("image", originalUrl, rel.Replace('\\', '/'), i));
         }
-
         for (var i = 0; i < request.video_playlists.Count; i++)
         {
-            var m3u8Url = request.video_playlists[i].m3u8_url;
             var rel = Path.Combine("videos", $"{(i + 1):000}.mp4");
-            var abs = Path.Combine(postDir, rel);
-
-            var result = await Video.DownloadAsync(appConfig.FfmpegPath, m3u8Url, abs, appConfig.VideoRetryCount, ct);
+            var result = await Video.DownloadAsync(appConfig.FfmpegPath, request.video_playlists[i].m3u8_url, Path.Combine(stagingDir, rel), appConfig.VideoRetryCount, ct);
             if (!result.Ok)
             {
-                TryDeleteDirectory(postDir);
+                TryDeleteDirectory(stagingDir);
                 return Results.UnprocessableEntity(ApiError.RetryableVideoFail(result.ErrorMessage));
             }
-
-            downloadedVideos.Add(new MediaRow("video", m3u8Url, rel.Replace('\\', '/'), i));
+            videos.Add(new MediaRow("video", request.video_playlists[i].m3u8_url, rel.Replace('\\', '/'), i));
         }
-
         await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
-
         var authorId = await Db.UpsertAuthorAsync(conn, tx, request.author.handle, request.author.name, savedAt, ct);
         var postId = await Db.InsertPostAsync(conn, tx, request, authorId, createdAt, savedAt, postDir, ct);
-
-        foreach (var media in downloadedImages.Concat(downloadedVideos))
+        foreach (var media in images.Concat(videos)) await Db.InsertMediaAsync(conn, tx, postId, media, ct);
+        foreach (var rawTag in request.tags.Select(TagUtil.Normalize).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
-            await Db.InsertMediaAsync(conn, tx, postId, media, ct);
-        }
-
-        foreach (var rawTag in request.tags)
-        {
-            var tagName = TagUtil.Normalize(rawTag);
-            if (string.IsNullOrWhiteSpace(tagName))
-            {
-                continue;
-            }
-
-            var tagId = await Db.UpsertTagAsync(conn, tx, tagName, savedAt, ct);
+            var tagId = await Db.UpsertTagAsync(conn, tx, rawTag, savedAt, ct);
             await Db.InsertPostTagAsync(conn, tx, postId, tagId, savedAt, ct);
         }
-
-        var meta = new MetaJson(
-            request.tweet_id,
-            request.url,
-            new MetaAuthor(request.author.handle, request.author.name),
-            request.created_at,
-            request.text,
-            savedAt.ToString("o"),
-            request.tags.Select(TagUtil.Normalize).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct().ToList(),
-            request.note,
-            new MetaMedia(
-                downloadedImages.Select(i => new MetaImage(i.original_url ?? string.Empty, i.local_path)).ToList(),
-                downloadedVideos.Select(v => new MetaVideo(v.original_url ?? string.Empty, v.local_path)).ToList()
-            )
-        );
-
-        var metaPath = Path.Combine(postDir, "meta.json");
-        await File.WriteAllTextAsync(metaPath, JsonSerializer.Serialize(meta, JsonOptions.Pretty), ct);
-
-        await tx.CommitAsync(ct);
-
-        return Results.Ok(new
+        if (Directory.Exists(postDir))
         {
-            ok = true,
-            post_id = postId,
-            dir_path = postDir
-        });
+            TryDeleteDirectory(stagingDir);
+            return Results.Conflict(ApiError.Conflict("POST_ALREADY_EXISTS", "同じ tweet_id は既に保存済みです。"));
+        }
+        Directory.Move(stagingDir, postDir);
+        finalDirCreated = true;
+        await tx.CommitAsync(ct);
+        return Results.Ok(new { ok = true, post_id = postId, dir_path = postDir });
     }
     catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
     {
-        TryDeleteDirectory(postDir);
-        return Results.Conflict(ApiError.Conflict("POST_ALREADY_EXISTS", "同じtweet_idは既に保存済みです。"));
+        if (finalDirCreated) TryDeleteDirectory(postDir);
+        TryDeleteDirectory(stagingDir);
+        return Results.Conflict(ApiError.Conflict("POST_ALREADY_EXISTS", "同じ tweet_id は既に保存済みです。"));
     }
     catch (Exception ex)
     {
-        TryDeleteDirectory(postDir);
+        if (finalDirCreated) TryDeleteDirectory(postDir);
+        TryDeleteDirectory(stagingDir);
         return Results.BadRequest(ApiError.BadRequest("SAVE_FAILED", ex.ToString()));
     }
 });
-
-app.MapPut("/api/v1/posts/{tweetId}", async (
-    string tweetId,
-    UpdatePostRequest request,
-    CancellationToken ct) =>
+app.MapPut("/api/v1/posts/{tweetId}", async (string tweetId, UpdatePostRequest request, CancellationToken ct) =>
 {
     if (!string.Equals(tweetId, request.tweet_id, StringComparison.Ordinal))
-    {
         return Results.BadRequest(ApiError.BadRequest("TWEET_ID_MISMATCH", "URL の tweet_id と本文の tweet_id が一致しません。"));
-    }
-
     var validationError = ValidateUpdateRequest(request);
-    if (validationError is not null)
-    {
-        return Results.BadRequest(validationError);
-    }
-
+    if (validationError is not null) return Results.BadRequest(validationError);
     if (!DateTimeOffset.TryParse(request.created_at, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var createdAt))
-    {
         return Results.BadRequest(ApiError.BadRequest("CREATED_AT_INVALID", "created_at は ISO 8601 形式で指定してください。"));
-    }
-
     await using var conn = Db.Open(appConfig.DatabasePath);
     await conn.OpenAsync(ct);
     var existing = await PostStore.LoadByTweetIdAsync(conn, tweetId, ct);
-    if (existing is null)
-    {
-        return Results.NotFound(ApiError.BadRequest("POST_NOT_FOUND", "保存済み投稿が見つかりません。"));
-    }
-
-    if (!Directory.Exists(existing.dir_path))
-    {
-        return Results.NotFound(ApiError.BadRequest("POST_DIR_NOT_FOUND", "保存済み投稿のディレクトリが見つかりません。"));
-    }
-
-    var metaPath = Path.Combine(existing.dir_path, "meta.json");
-    if (!File.Exists(metaPath))
-    {
-        return Results.NotFound(ApiError.BadRequest("META_NOT_FOUND", "meta.json が見つかりません。"));
-    }
-
+    if (existing is null) return Results.NotFound(ApiError.BadRequest("POST_NOT_FOUND", "保存済み投稿が見つかりません。"));
+    if (!Directory.Exists(existing.dir_path)) return Results.NotFound(ApiError.BadRequest("POST_DIR_NOT_FOUND", "保存済み投稿のディレクトリが見つかりません。"));
     try
     {
-        var normalizedTags = request.tags
-            .Select(TagUtil.Normalize)
-            .Where(x => !string.IsNullOrWhiteSpace(x))
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
+        var tags = request.tags.Select(TagUtil.Normalize).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
         await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
         var authorId = await Db.UpsertAuthorAsync(conn, tx, request.author.handle, request.author.name, DateTimeOffset.Now, ct);
-        await Db.UpdatePostAsync(conn, tx, existing.id, request.url, authorId, createdAt, request.text, request.note, ct);
-        await Db.ReplacePostTagsAsync(conn, tx, existing.id, normalizedTags, DateTimeOffset.Now, ct);
-
-        var meta = JsonSerializer.Deserialize<MetaJson>(await File.ReadAllTextAsync(metaPath, ct));
-        if (meta is null)
-        {
-            return Results.BadRequest(ApiError.BadRequest("META_INVALID", "meta.json を読み込めませんでした。"));
-        }
-
-        var updatedMeta = new MetaJson(
-            request.tweet_id,
-            request.url,
-            new MetaAuthor(request.author.handle, request.author.name),
-            request.created_at,
-            request.text,
-            existing.saved_at,
-            normalizedTags,
-            request.note,
-            meta.media
-        );
-
-        await File.WriteAllTextAsync(metaPath, JsonSerializer.Serialize(updatedMeta, JsonOptions.Pretty), ct);
+        await Db.UpdatePostAsync(conn, tx, existing.id, request.url, authorId, createdAt, request.text ?? string.Empty, request.note, ct);
+        await Db.ReplacePostTagsAsync(conn, tx, existing.id, tags, DateTimeOffset.Now, ct);
         await tx.CommitAsync(ct);
-
-        return Results.Ok(new
-        {
-            ok = true,
-            updated = true,
-            tweet_id = request.tweet_id,
-            dir_path = existing.dir_path
-        });
+        return Results.Ok(new { ok = true, updated = true, tweet_id = request.tweet_id, dir_path = existing.dir_path });
     }
     catch (Exception ex)
     {
         return Results.BadRequest(ApiError.BadRequest("UPDATE_FAILED", ex.ToString()));
     }
 });
-
 app.Run($"http://{appConfig.Host}:{appConfig.Port}");
 
 static ApiError? ValidateRequest(SavePostRequest request)
 {
-    if (request.tags is null) return ApiError.BadRequest("TAGS_REQUIRED", "tags は空配列で送信してください。");
-    if (request.images is null) return ApiError.BadRequest("IMAGES_REQUIRED", "images は空配列で送信してください。");
-    if (request.video_playlists is null) return ApiError.BadRequest("VIDEO_PLAYLISTS_REQUIRED", "video_playlists は空配列で送信してください。");
+    if (request.tags is null) return ApiError.BadRequest("TAGS_REQUIRED", "tags は配列で指定してください。");
+    if (request.images is null) return ApiError.BadRequest("IMAGES_REQUIRED", "images は配列で指定してください。");
+    if (request.video_playlists is null) return ApiError.BadRequest("VIDEO_PLAYLISTS_REQUIRED", "video_playlists は配列で指定してください。");
     if (string.IsNullOrWhiteSpace(request.tweet_id)) return ApiError.BadRequest("TWEET_ID_REQUIRED", "tweet_id は必須です。");
     if (!Regex.IsMatch(request.tweet_id, @"^\d+$")) return ApiError.BadRequest("TWEET_ID_INVALID", "tweet_id は数値のみ指定してください。");
     if (string.IsNullOrWhiteSpace(request.url)) return ApiError.BadRequest("URL_REQUIRED", "url は必須です。");
     if (string.IsNullOrWhiteSpace(request.author.handle)) return ApiError.BadRequest("AUTHOR_HANDLE_REQUIRED", "author.handle は必須です。");
     if (string.IsNullOrWhiteSpace(request.author.name)) return ApiError.BadRequest("AUTHOR_NAME_REQUIRED", "author.name は必須です。");
     if (string.IsNullOrWhiteSpace(request.created_at)) return ApiError.BadRequest("CREATED_AT_REQUIRED", "created_at は必須です。");
-    if (string.IsNullOrWhiteSpace(request.text)) return ApiError.BadRequest("TEXT_REQUIRED", "text は必須です。");
     if (string.IsNullOrWhiteSpace(request.screenshot_base64)) return ApiError.BadRequest("SCREENSHOT_REQUIRED", "screenshot_base64 は必須です。");
     if (request.screenshot_base64.Length > 15_000_000) return ApiError.BadRequest("PAYLOAD_TOO_LARGE", "screenshot_base64 が大きすぎます。");
-    if (!UrlUtil.IsAllowedPostUrl(request.url)) return ApiError.BadRequest("URL_INVALID", "url は X のポストURLを指定してください。");
-
-    foreach (var image in request.images)
-    {
-        if (!UrlUtil.IsAllowedImageUrl(image.url))
-        {
-            return ApiError.BadRequest("IMAGE_URL_INVALID", $"許可されていない画像URLです: {image.url}");
-        }
-    }
-
-    foreach (var video in request.video_playlists)
-    {
-        if (!UrlUtil.IsAllowedVideoUrl(video.m3u8_url))
-        {
-            return ApiError.BadRequest("VIDEO_URL_INVALID", $"許可されていない動画URLです: {video.m3u8_url}");
-        }
-    }
-
+    if (!UrlUtil.IsAllowedPostUrl(request.url)) return ApiError.BadRequest("URL_INVALID", "url は X の投稿 URL を指定してください。");
+    foreach (var image in request.images) if (!UrlUtil.IsAllowedImageUrl(image.url)) return ApiError.BadRequest("IMAGE_URL_INVALID", $"許可されていない画像 URL です: {image.url}");
+    foreach (var video in request.video_playlists) if (!UrlUtil.IsAllowedVideoUrl(video.m3u8_url)) return ApiError.BadRequest("VIDEO_URL_INVALID", $"許可されていない動画 URL です: {video.m3u8_url}");
     return null;
 }
 
 static ApiError? ValidateUpdateRequest(UpdatePostRequest request)
 {
-    if (request.tags is null) return ApiError.BadRequest("TAGS_REQUIRED", "tags は空配列で送信してください。");
+    if (request.tags is null) return ApiError.BadRequest("TAGS_REQUIRED", "tags は配列で指定してください。");
     if (string.IsNullOrWhiteSpace(request.tweet_id)) return ApiError.BadRequest("TWEET_ID_REQUIRED", "tweet_id は必須です。");
     if (!Regex.IsMatch(request.tweet_id, @"^\d+$")) return ApiError.BadRequest("TWEET_ID_INVALID", "tweet_id は数値のみ指定してください。");
     if (string.IsNullOrWhiteSpace(request.url)) return ApiError.BadRequest("URL_REQUIRED", "url は必須です。");
     if (string.IsNullOrWhiteSpace(request.author.handle)) return ApiError.BadRequest("AUTHOR_HANDLE_REQUIRED", "author.handle は必須です。");
     if (string.IsNullOrWhiteSpace(request.author.name)) return ApiError.BadRequest("AUTHOR_NAME_REQUIRED", "author.name は必須です。");
     if (string.IsNullOrWhiteSpace(request.created_at)) return ApiError.BadRequest("CREATED_AT_REQUIRED", "created_at は必須です。");
-    if (string.IsNullOrWhiteSpace(request.text)) return ApiError.BadRequest("TEXT_REQUIRED", "text は必須です。");
-    if (!UrlUtil.IsAllowedPostUrl(request.url)) return ApiError.BadRequest("URL_INVALID", "url は X のポスト URL を指定してください。");
+    if (!UrlUtil.IsAllowedPostUrl(request.url)) return ApiError.BadRequest("URL_INVALID", "url は X の投稿 URL を指定してください。");
     return null;
 }
 
 static byte[] DecodeDataUrlPng(string dataUrl)
 {
-    var marker = "base64,";
-    var idx = dataUrl.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
-    if (idx < 0)
-    {
-        throw new InvalidOperationException("screenshot_base64 が data URL 形式ではありません。");
-    }
-
-    var base64 = dataUrl[(idx + marker.Length)..];
-    return Convert.FromBase64String(base64);
+    var idx = dataUrl.IndexOf("base64,", StringComparison.OrdinalIgnoreCase);
+    if (idx < 0) throw new InvalidOperationException("screenshot_base64 は data URL 形式である必要があります。");
+    return Convert.FromBase64String(dataUrl[(idx + 7)..]);
 }
 
 static async Task DownloadFileAsync(HttpClient client, string url, string outPath, CancellationToken ct)
@@ -387,17 +213,7 @@ static async Task DownloadFileAsync(HttpClient client, string url, string outPat
 
 static void TryDeleteDirectory(string path)
 {
-    try
-    {
-        if (Directory.Exists(path))
-        {
-            Directory.Delete(path, true);
-        }
-    }
-    catch
-    {
-        // cleanup best effort
-    }
+    try { if (Directory.Exists(path)) Directory.Delete(path, true); } catch { }
 }
 
 sealed record AppConfig(string Host, int Port, string StorageRootPath, string DatabasePath, string TokenFilePath, string FfmpegPath, int VideoRetryCount)
@@ -405,80 +221,32 @@ sealed record AppConfig(string Host, int Port, string StorageRootPath, string Da
     public static AppConfig From(IConfiguration config)
     {
         var ffmpegPath = config["Video:FfmpegPath"] ?? "tools/ffmpeg.exe";
-        if (!Path.IsPathRooted(ffmpegPath))
-        {
-            ffmpegPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ffmpegPath));
-        }
-
-        return new AppConfig(
-            config["Server:Host"] ?? "127.0.0.1",
-            int.TryParse(config["Server:Port"], out var p) ? p : 18765,
-            config["Storage:RootPath"] ?? "./XArchive",
-            config["Database:Path"] ?? "./data/archive.db",
-            config["Auth:TokenFilePath"] ?? "./data/auth_token.txt",
-            ffmpegPath,
-            int.TryParse(config["Video:RetryCount"], out var r) ? r : 2
-        );
+        if (!Path.IsPathRooted(ffmpegPath)) ffmpegPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ffmpegPath));
+        return new AppConfig(config["Server:Host"] ?? "127.0.0.1", int.TryParse(config["Server:Port"], out var p) ? p : 18765, config["Storage:RootPath"] ?? "./XArchive", config["Database:Path"] ?? "./data/archive.db", config["Auth:TokenFilePath"] ?? "./data/auth_token.txt", ffmpegPath, int.TryParse(config["Video:RetryCount"], out var r) ? r : 2);
     }
 }
 
-sealed record SavePostRequest(
-    string tweet_id,
-    string url,
-    Author author,
-    string created_at,
-    string text,
-    List<string> tags,
-    string? note,
-    string screenshot_base64,
-    List<ImageInput> images,
-    List<VideoPlaylistInput> video_playlists
-)
+sealed record SavePostRequest(string tweet_id, string url, Author author, string created_at, string text, List<string> tags, string? note, string screenshot_base64, List<ImageInput> images, List<VideoPlaylistInput> video_playlists)
 {
-    public SavePostRequest() : this("", "", new Author("", ""), "", "", [], null, "", [], [])
-    {
-    }
+    public SavePostRequest() : this("", "", new Author("", ""), "", "", [], null, "", [], []) { }
 }
-
-sealed record UpdatePostRequest(
-    string tweet_id,
-    string url,
-    Author author,
-    string created_at,
-    string text,
-    List<string> tags,
-    string? note
-)
+sealed record UpdatePostRequest(string tweet_id, string url, Author author, string created_at, string text, List<string> tags, string? note)
 {
-    public UpdatePostRequest() : this("", "", new Author("", ""), "", "", [], null)
-    {
-    }
+    public UpdatePostRequest() : this("", "", new Author("", ""), "", "", [], null) { }
 }
-
 sealed record Author(string handle, string name);
 sealed record ImageInput(string url);
 sealed record VideoPlaylistInput(string m3u8_url);
 sealed record MediaRow(string media_type, string? original_url, string local_path, int sort_order);
 sealed record TagCatalogResponseItem(string name, int count);
 sealed record ExistingPostResponse(long id, string tweet_id, string url, string created_at, string text, string? note, string saved_at, string dir_path, Author author, List<string> tags);
-
 sealed record ApiError(bool ok, string error_code, string message, bool can_retry = false)
 {
     public static ApiError BadRequest(string code, string message) => new(false, code, message);
     public static ApiError Unauthorized(string message) => new(false, "UNAUTHORIZED", message);
     public static ApiError Conflict(string code, string message) => new(false, code, message);
-    public static ApiError RetryableVideoFail(string message) => new(false, "VIDEO_DOWNLOAD_FAILED", message, can_retry: true);
+    public static ApiError RetryableVideoFail(string message) => new(false, "VIDEO_DOWNLOAD_FAILED", message, true);
 }
-
-static class JsonOptions
-{
-    public static readonly JsonSerializerOptions Pretty = new()
-    {
-        WriteIndented = true,
-        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
-    };
-}
-
 static class Auth
 {
     public static async Task<string> LoadOrCreateTokenAsync(string tokenFilePath)
@@ -487,260 +255,142 @@ static class Auth
         if (File.Exists(full))
         {
             var existing = await File.ReadAllTextAsync(full);
-            if (!string.IsNullOrWhiteSpace(existing))
-            {
-                return existing.Trim();
-            }
+            if (!string.IsNullOrWhiteSpace(existing)) return existing.Trim();
         }
-
         var token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32));
         await File.WriteAllTextAsync(full, token);
         return token;
     }
 }
-
 static class UrlUtil
 {
     public static string PreferOrig(string url)
     {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return url;
-        if (!uri.Host.Contains("twimg.com", StringComparison.OrdinalIgnoreCase)) return url;
-
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !uri.Host.Contains("twimg.com", StringComparison.OrdinalIgnoreCase)) return url;
         var builder = new UriBuilder(uri);
         var map = ParseQuery(builder.Query);
         map["name"] = "orig";
-        builder.Query = string.Join("&", map.Select(kv =>
-            $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
+        builder.Query = string.Join("&", map.Select(kv => $"{Uri.EscapeDataString(kv.Key)}={Uri.EscapeDataString(kv.Value)}"));
         return builder.Uri.AbsoluteUri;
     }
-
     public static string DetectExtension(string url, string fallback)
     {
         try
         {
-            var path = new Uri(url).AbsolutePath;
-            var ext = Path.GetExtension(path).Trim('.');
+            var ext = Path.GetExtension(new Uri(url).AbsolutePath).Trim('.');
             return string.IsNullOrWhiteSpace(ext) ? fallback : ext.ToLowerInvariant();
         }
-        catch
-        {
-            return fallback;
-        }
+        catch { return fallback; }
     }
-
     public static bool IsAllowedPostUrl(string url)
     {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
-        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
-        if (!uri.Host.Equals("x.com", StringComparison.OrdinalIgnoreCase) &&
-            !uri.Host.Equals("twitter.com", StringComparison.OrdinalIgnoreCase))
-        {
-            return false;
-        }
-
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
+        if (!uri.Host.Equals("x.com", StringComparison.OrdinalIgnoreCase) && !uri.Host.Equals("twitter.com", StringComparison.OrdinalIgnoreCase)) return false;
         return uri.AbsolutePath.Contains("/status/", StringComparison.OrdinalIgnoreCase);
     }
-
-    public static bool IsAllowedImageUrl(string url)
-    {
-        return IsHttpsHost(url, "pbs.twimg.com", ".twimg.com");
-    }
-
-    public static bool IsAllowedVideoUrl(string url)
-    {
-        return IsHttpsHost(url, "video.twimg.com", ".twimg.com");
-    }
-
+    public static bool IsAllowedImageUrl(string url) => IsHttpsHost(url, "pbs.twimg.com", ".twimg.com");
+    public static bool IsAllowedVideoUrl(string url) => IsHttpsHost(url, "video.twimg.com", ".twimg.com");
     private static bool IsHttpsHost(string url, params string[] allowedHosts)
     {
-        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri)) return false;
-        if (!string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
-        return allowedHosts.Any(host =>
-            uri.Host.Equals(host, StringComparison.OrdinalIgnoreCase) ||
-            (host.StartsWith(".") && uri.Host.EndsWith(host, StringComparison.OrdinalIgnoreCase)));
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase)) return false;
+        return allowedHosts.Any(host => uri.Host.Equals(host, StringComparison.OrdinalIgnoreCase) || (host.StartsWith(".") && uri.Host.EndsWith(host, StringComparison.OrdinalIgnoreCase)));
     }
-
     private static Dictionary<string, string> ParseQuery(string query)
     {
         var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        var trim = query.TrimStart('?');
-        if (string.IsNullOrWhiteSpace(trim)) return map;
-
-        foreach (var pair in trim.Split('&', StringSplitOptions.RemoveEmptyEntries))
+        foreach (var pair in query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
         {
             var kv = pair.Split('=', 2);
-            var key = Uri.UnescapeDataString(kv[0]);
-            var value = kv.Length > 1 ? Uri.UnescapeDataString(kv[1]) : string.Empty;
-            map[key] = value;
+            map[Uri.UnescapeDataString(kv[0])] = kv.Length > 1 ? Uri.UnescapeDataString(kv[1]) : string.Empty;
         }
-
         return map;
     }
 }
-
 static class TagUtil
 {
-    public static string Normalize(string tag)
-    {
-        if (string.IsNullOrWhiteSpace(tag)) return string.Empty;
-        var trimmed = tag.Trim();
-        return System.Text.RegularExpressions.Regex.Replace(trimmed, "\\s+", " ");
-    }
+    public static string Normalize(string tag) => string.IsNullOrWhiteSpace(tag) ? string.Empty : Regex.Replace(tag.Trim(), "\\s+", " ");
 }
-
 static class Video
 {
-    public static async Task<(bool Ok, string ErrorMessage)> DownloadAsync(
-        string ffmpegPath,
-        string m3u8Url,
-        string outPath,
-        int retryCount,
-        CancellationToken ct)
+    public static async Task<(bool Ok, string ErrorMessage)> DownloadAsync(string ffmpegPath, string m3u8Url, string outPath, int retryCount, CancellationToken ct)
     {
         for (var attempt = 0; attempt <= retryCount; attempt++)
         {
-            var psi = new ProcessStartInfo
-            {
-                FileName = ffmpegPath,
-                Arguments = $"-y -i \"{m3u8Url}\" -c copy \"{outPath}\"",
-                RedirectStandardError = true,
-                RedirectStandardOutput = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            };
-
+            var psi = new ProcessStartInfo { FileName = ffmpegPath, Arguments = $"-y -i \"{m3u8Url}\" -c copy \"{outPath}\"", RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
             try
             {
                 using var process = Process.Start(psi);
-                if (process is null)
-                {
-                    return (false, "ffmpeg の起動に失敗しました。");
-                }
-
+                if (process is null) return (false, "ffmpeg の起動に失敗しました。");
                 await process.WaitForExitAsync(ct);
                 var stderr = await process.StandardError.ReadToEndAsync();
-
-                if (process.ExitCode == 0 && File.Exists(outPath))
-                {
-                    return (true, string.Empty);
-                }
-
-                if (attempt == retryCount)
-                {
-                    return (false, $"ffmpeg終了コード: {process.ExitCode}\n{stderr}");
-                }
+                if (process.ExitCode == 0 && File.Exists(outPath)) return (true, string.Empty);
+                if (attempt == retryCount) return (false, $"ffmpeg exit code={process.ExitCode}\n{stderr}");
             }
             catch (Exception ex)
             {
-                if (attempt == retryCount)
-                {
-                    return (false, ex.ToString());
-                }
+                if (attempt == retryCount) return (false, ex.ToString());
             }
         }
-
         return (false, "動画保存に失敗しました。");
     }
 }
-
 static class Db
 {
     public static async Task InitializeAsync(string dbPath, string schemaPath)
     {
         var fullDbPath = Path.GetFullPath(dbPath);
         Directory.CreateDirectory(Path.GetDirectoryName(fullDbPath)!);
-        var connString = $"Data Source={fullDbPath}";
-        await using var conn = new SqliteConnection(connString);
+        await using var conn = new SqliteConnection($"Data Source={fullDbPath}");
         await conn.OpenAsync();
-
-        var sql = await File.ReadAllTextAsync(schemaPath);
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = sql;
+        cmd.CommandText = await File.ReadAllTextAsync(schemaPath);
         await cmd.ExecuteNonQueryAsync();
     }
-
-    public static SqliteConnection Open(string dbPath)
-    {
-        var fullDbPath = Path.GetFullPath(dbPath);
-        return new SqliteConnection($"Data Source={fullDbPath}");
-    }
-
+    public static SqliteConnection Open(string dbPath) => new($"Data Source={Path.GetFullPath(dbPath)}");
     public static async Task<bool> PostExistsAsync(SqliteConnection conn, string tweetId, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT 1 FROM posts WHERE tweet_id = $tweet_id LIMIT 1";
         cmd.Parameters.AddWithValue("$tweet_id", tweetId);
-        var result = await cmd.ExecuteScalarAsync(ct);
-        return result is not null;
+        return await cmd.ExecuteScalarAsync(ct) is not null;
     }
-
-    public static async Task<List<string>> LoadTagNamesAsync(SqliteConnection conn, CancellationToken ct)
-    {
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "SELECT name FROM tags ORDER BY name COLLATE NOCASE ASC;";
-        var list = new List<string>();
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
-        {
-            if (reader.IsDBNull(0)) continue;
-            var name = reader.GetString(0);
-            if (string.IsNullOrWhiteSpace(name)) continue;
-            list.Add(name);
-        }
-
-        return list;
-    }
-
     public static async Task<long> UpsertAuthorAsync(SqliteConnection conn, SqliteTransaction tx, string handle, string name, DateTimeOffset now, CancellationToken ct)
     {
         await using (var upsert = conn.CreateCommand())
         {
             upsert.Transaction = tx;
-            upsert.CommandText = @"
-INSERT INTO authors (handle, name, created_at, updated_at)
-VALUES ($handle, $name, $now, $now)
-ON CONFLICT(handle) DO UPDATE SET
-  name = excluded.name,
-  updated_at = excluded.updated_at;";
+            upsert.CommandText = "INSERT INTO authors (handle, name, created_at, updated_at) VALUES ($handle, $name, $now, $now) ON CONFLICT(handle) DO UPDATE SET name = excluded.name, updated_at = excluded.updated_at;";
             upsert.Parameters.AddWithValue("$handle", handle);
             upsert.Parameters.AddWithValue("$name", name);
             upsert.Parameters.AddWithValue("$now", now.ToString("o"));
             await upsert.ExecuteNonQueryAsync(ct);
         }
-
         await using var select = conn.CreateCommand();
         select.Transaction = tx;
         select.CommandText = "SELECT id FROM authors WHERE handle = $handle";
         select.Parameters.AddWithValue("$handle", handle);
         return (long)(await select.ExecuteScalarAsync(ct) ?? 0L);
     }
-
     public static async Task<long> InsertPostAsync(SqliteConnection conn, SqliteTransaction tx, SavePostRequest request, long authorId, DateTimeOffset createdAt, DateTimeOffset savedAt, string dirPath, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = @"
-INSERT INTO posts (tweet_id, url, author_id, created_at, text, note, saved_at, dir_path)
-VALUES ($tweet_id, $url, $author_id, $created_at, $text, $note, $saved_at, $dir_path);
-SELECT last_insert_rowid();";
+        cmd.CommandText = "INSERT INTO posts (tweet_id, url, author_id, created_at, text, note, saved_at, dir_path) VALUES ($tweet_id, $url, $author_id, $created_at, $text, $note, $saved_at, $dir_path); SELECT last_insert_rowid();";
         cmd.Parameters.AddWithValue("$tweet_id", request.tweet_id);
         cmd.Parameters.AddWithValue("$url", request.url);
         cmd.Parameters.AddWithValue("$author_id", authorId);
         cmd.Parameters.AddWithValue("$created_at", createdAt.ToString("o"));
-        cmd.Parameters.AddWithValue("$text", request.text);
+        cmd.Parameters.AddWithValue("$text", request.text ?? string.Empty);
         cmd.Parameters.AddWithValue("$note", (object?)request.note ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$saved_at", savedAt.ToString("o"));
         cmd.Parameters.AddWithValue("$dir_path", dirPath);
         return (long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
     }
-
     public static async Task InsertMediaAsync(SqliteConnection conn, SqliteTransaction tx, long postId, MediaRow media, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = @"
-INSERT INTO media (post_id, media_type, original_url, local_path, sort_order)
-VALUES ($post_id, $media_type, $original_url, $local_path, $sort_order);";
+        cmd.CommandText = "INSERT INTO media (post_id, media_type, original_url, local_path, sort_order) VALUES ($post_id, $media_type, $original_url, $local_path, $sort_order);";
         cmd.Parameters.AddWithValue("$post_id", postId);
         cmd.Parameters.AddWithValue("$media_type", media.media_type);
         cmd.Parameters.AddWithValue("$original_url", (object?)media.original_url ?? DBNull.Value);
@@ -748,54 +398,37 @@ VALUES ($post_id, $media_type, $original_url, $local_path, $sort_order);";
         cmd.Parameters.AddWithValue("$sort_order", media.sort_order);
         await cmd.ExecuteNonQueryAsync(ct);
     }
-
     public static async Task<long> UpsertTagAsync(SqliteConnection conn, SqliteTransaction tx, string tag, DateTimeOffset now, CancellationToken ct)
     {
         await using (var upsert = conn.CreateCommand())
         {
             upsert.Transaction = tx;
-            upsert.CommandText = @"
-INSERT INTO tags (name, created_at)
-VALUES ($name, $now)
-ON CONFLICT(name) DO NOTHING;";
+            upsert.CommandText = "INSERT INTO tags (name, created_at) VALUES ($name, $now) ON CONFLICT(name) DO NOTHING;";
             upsert.Parameters.AddWithValue("$name", tag);
             upsert.Parameters.AddWithValue("$now", now.ToString("o"));
             await upsert.ExecuteNonQueryAsync(ct);
         }
-
         await using var select = conn.CreateCommand();
         select.Transaction = tx;
         select.CommandText = "SELECT id FROM tags WHERE name = $name";
         select.Parameters.AddWithValue("$name", tag);
         return (long)(await select.ExecuteScalarAsync(ct) ?? 0L);
     }
-
     public static async Task InsertPostTagAsync(SqliteConnection conn, SqliteTransaction tx, long postId, long tagId, DateTimeOffset now, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = @"
-INSERT INTO post_tags (post_id, tag_id, created_at)
-VALUES ($post_id, $tag_id, $now)
-ON CONFLICT(post_id, tag_id) DO NOTHING;";
+        cmd.CommandText = "INSERT INTO post_tags (post_id, tag_id, created_at) VALUES ($post_id, $tag_id, $now) ON CONFLICT(post_id, tag_id) DO NOTHING;";
         cmd.Parameters.AddWithValue("$post_id", postId);
         cmd.Parameters.AddWithValue("$tag_id", tagId);
         cmd.Parameters.AddWithValue("$now", now.ToString("o"));
         await cmd.ExecuteNonQueryAsync(ct);
     }
-
     public static async Task UpdatePostAsync(SqliteConnection conn, SqliteTransaction tx, long postId, string url, long authorId, DateTimeOffset createdAt, string text, string? note, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = @"
-UPDATE posts
-SET url = $url,
-    author_id = $author_id,
-    created_at = $created_at,
-    text = $text,
-    note = $note
-WHERE id = $id;";
+        cmd.CommandText = "UPDATE posts SET url = $url, author_id = $author_id, created_at = $created_at, text = $text, note = $note WHERE id = $id;";
         cmd.Parameters.AddWithValue("$id", postId);
         cmd.Parameters.AddWithValue("$url", url);
         cmd.Parameters.AddWithValue("$author_id", authorId);
@@ -804,7 +437,6 @@ WHERE id = $id;";
         cmd.Parameters.AddWithValue("$note", (object?)note ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
     }
-
     public static async Task ReplacePostTagsAsync(SqliteConnection conn, SqliteTransaction tx, long postId, List<string> tags, DateTimeOffset now, CancellationToken ct)
     {
         await using (var delete = conn.CreateCommand())
@@ -814,7 +446,6 @@ WHERE id = $id;";
             delete.Parameters.AddWithValue("$post_id", postId);
             await delete.ExecuteNonQueryAsync(ct);
         }
-
         foreach (var tag in tags)
         {
             var tagId = await UpsertTagAsync(conn, tx, tag, now, ct);
@@ -822,145 +453,42 @@ WHERE id = $id;";
         }
     }
 }
-
 static class TagCatalog
 {
-    public static async Task<List<TagCatalogResponseItem>> LoadAsync(SqliteConnection conn, string archiveRoot, CancellationToken ct)
+    public static async Task<List<TagCatalogResponseItem>> LoadAsync(SqliteConnection conn, CancellationToken ct)
     {
-        var counts = LoadTagCountsFromArchive(archiveRoot);
-        var tagNames = await Db.LoadTagNamesAsync(conn, ct);
-
-        foreach (var name in tagNames)
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT t.name, COUNT(pt.post_id) AS usage_count FROM tags t LEFT JOIN post_tags pt ON pt.tag_id = t.id GROUP BY t.id, t.name ORDER BY usage_count DESC, t.name COLLATE NOCASE ASC;";
+        var items = new List<TagCatalogResponseItem>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
         {
-            if (!counts.ContainsKey(name))
-            {
-                counts[name] = 0;
-            }
+            if (!reader.IsDBNull(0)) items.Add(new TagCatalogResponseItem(reader.GetString(0), reader.GetInt32(1)));
         }
-
-        return counts
-            .OrderByDescending(x => x.Value)
-            .ThenBy(x => x.Key, StringComparer.CurrentCulture)
-            .Select(x => new TagCatalogResponseItem(x.Key, x.Value))
-            .ToList();
-    }
-
-    private static Dictionary<string, int> LoadTagCountsFromArchive(string archiveRoot)
-    {
-        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        if (!Directory.Exists(archiveRoot))
-        {
-            return counts;
-        }
-
-        foreach (var dir in Directory.GetDirectories(archiveRoot, "tweet-*", SearchOption.TopDirectoryOnly))
-        {
-            var metaPath = Path.Combine(dir, "meta.json");
-            if (!File.Exists(metaPath))
-            {
-                continue;
-            }
-
-            try
-            {
-                var meta = JsonSerializer.Deserialize<MetaJson>(File.ReadAllText(metaPath));
-                if (meta?.tags is null)
-                {
-                    continue;
-                }
-
-                foreach (var tag in meta.tags
-                    .Where(x => !string.IsNullOrWhiteSpace(x))
-                    .Select(TagUtil.Normalize)
-                    .Where(x => !string.IsNullOrWhiteSpace(x))
-                    .Distinct(StringComparer.OrdinalIgnoreCase))
-                {
-                    counts[tag] = counts.TryGetValue(tag, out var current) ? current + 1 : 1;
-                }
-            }
-            catch
-            {
-                // Ignore broken files.
-            }
-        }
-
-        return counts;
+        return items;
     }
 }
-
 static class PostStore
 {
     public static async Task<ExistingPostResponse?> LoadByTweetIdAsync(SqliteConnection conn, string tweetId, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
-SELECT p.id, p.tweet_id, p.url, p.created_at, p.text, p.note, p.saved_at, p.dir_path, a.handle, a.name
-FROM posts p
-JOIN authors a ON a.id = p.author_id
-WHERE p.tweet_id = $tweet_id
-LIMIT 1;";
+        cmd.CommandText = "SELECT p.id, p.tweet_id, p.url, p.created_at, p.text, p.note, p.saved_at, p.dir_path, a.handle, a.name FROM posts p JOIN authors a ON a.id = p.author_id WHERE p.tweet_id = $tweet_id LIMIT 1;";
         cmd.Parameters.AddWithValue("$tweet_id", tweetId);
-
         await using var reader = await cmd.ExecuteReaderAsync(ct);
-        if (!await reader.ReadAsync(ct))
-        {
-            return null;
-        }
-
+        if (!await reader.ReadAsync(ct)) return null;
         var postId = reader.GetInt64(0);
-        var tags = await LoadPostTagsAsync(conn, postId, ct);
-
-        return new ExistingPostResponse(
-            postId,
-            reader.GetString(1),
-            reader.GetString(2),
-            reader.GetString(3),
-            reader.GetString(4),
-            reader.IsDBNull(5) ? null : reader.GetString(5),
-            reader.GetString(6),
-            reader.GetString(7),
-            new Author(reader.GetString(8), reader.GetString(9)),
-            tags);
-    }
-
-    private static async Task<List<string>> LoadPostTagsAsync(SqliteConnection conn, long postId, CancellationToken ct)
-    {
-        await using var cmd = conn.CreateCommand();
-        cmd.CommandText = @"
-SELECT t.name
-FROM post_tags pt
-JOIN tags t ON t.id = pt.tag_id
-WHERE pt.post_id = $post_id
-ORDER BY t.name COLLATE NOCASE ASC;";
-        cmd.Parameters.AddWithValue("$post_id", postId);
-
         var tags = new List<string>();
-        await using var reader = await cmd.ExecuteReaderAsync(ct);
-        while (await reader.ReadAsync(ct))
+        await using (var tagCmd = conn.CreateCommand())
         {
-            if (!reader.IsDBNull(0))
+            tagCmd.CommandText = "SELECT t.name FROM post_tags pt JOIN tags t ON t.id = pt.tag_id WHERE pt.post_id = $post_id ORDER BY t.name COLLATE NOCASE ASC;";
+            tagCmd.Parameters.AddWithValue("$post_id", postId);
+            await using var tagReader = await tagCmd.ExecuteReaderAsync(ct);
+            while (await tagReader.ReadAsync(ct))
             {
-                tags.Add(reader.GetString(0));
+                if (!tagReader.IsDBNull(0)) tags.Add(tagReader.GetString(0));
             }
         }
-
-        return tags;
+        return new ExistingPostResponse(postId, reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? string.Empty : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetString(6), reader.GetString(7), new Author(reader.GetString(8), reader.GetString(9)), tags);
     }
 }
-
-sealed record MetaJson(
-    string tweet_id,
-    string url,
-    MetaAuthor author,
-    string created_at,
-    string text,
-    string saved_at,
-    List<string> tags,
-    string? note,
-    MetaMedia media
-);
-
-sealed record MetaAuthor(string handle, string name);
-sealed record MetaMedia(List<MetaImage> images, List<MetaVideo> videos);
-sealed record MetaImage(string original_url, string local_path);
-sealed record MetaVideo(string playlist_url, string local_path);

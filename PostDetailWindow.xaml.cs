@@ -2,8 +2,6 @@
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
@@ -95,44 +93,18 @@ public partial class PostDetailWindow : Window
 
     private void SaveTags_Click(object sender, RoutedEventArgs e)
     {
-        try
+        var tags = _editableTags
+            .Select(x => x.Name)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (DesktopArchiveStore.SavePostChanges(_item.DirPath, tags, _item.Note ?? string.Empty, out var errorMessage))
         {
-            var metaPath = Path.Combine(_item.DirPath, "meta.json");
-            if (!File.Exists(metaPath))
-            {
-                MessageBox.Show("meta.json が見つかりません。", "タグ保存", MessageBoxButton.OK, MessageBoxImage.Warning);
-                return;
-            }
-
-            var text = File.ReadAllText(metaPath);
-            var node = JsonNode.Parse(text) as JsonObject;
-            if (node is null)
-            {
-                MessageBox.Show("meta.json の形式が不正です。", "タグ保存", MessageBoxButton.OK, MessageBoxImage.Error);
-                return;
-            }
-
-            var tagArray = new JsonArray();
-            foreach (var tag in _editableTags.Select(x => x.Name).Distinct(StringComparer.OrdinalIgnoreCase))
-            {
-                tagArray.Add(tag);
-            }
-
-            node["tags"] = tagArray;
-            var output = JsonSerializer.Serialize(
-                node,
-                new JsonSerializerOptions
-                {
-                    WriteIndented = true,
-                    TypeInfoResolver = new System.Text.Json.Serialization.Metadata.DefaultJsonTypeInfoResolver()
-                });
-            File.WriteAllText(metaPath, output);
             MessageBox.Show("タグを保存しました。", "タグ保存", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
         }
-        catch (Exception ex)
-        {
-            MessageBox.Show(ex.Message, "タグ保存エラー", MessageBoxButton.OK, MessageBoxImage.Error);
-        }
+
+        MessageBox.Show(errorMessage, "タグ保存エラー", MessageBoxButton.OK, MessageBoxImage.Error);
     }
 
     private void RefreshTagUi()

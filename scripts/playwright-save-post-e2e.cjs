@@ -270,16 +270,9 @@ async function savePost(payload, token) {
 async function verifySavedArtifacts(dirPath, tweetId) {
   if (!dirPath) throw new Error("dir_path is missing from API response");
 
-  const metaPath = path.join(dirPath, "meta.json");
   const screenshotPath = path.join(dirPath, "screenshot.png");
   if (!fs.existsSync(dirPath)) throw new Error(`Saved dir not found: ${dirPath}`);
-  if (!fs.existsSync(metaPath)) throw new Error(`meta.json not found: ${metaPath}`);
   if (!fs.existsSync(screenshotPath)) throw new Error(`screenshot.png not found: ${screenshotPath}`);
-
-  const meta = JSON.parse(await fsp.readFile(metaPath, "utf8"));
-  if (meta.tweet_id !== tweetId) {
-    throw new Error(`tweet_id mismatch in meta.json: expected=${tweetId} actual=${meta.tweet_id}`);
-  }
 }
 
 function sleep(ms) {

@@ -226,7 +226,14 @@ async function loadOrBootstrapToken(apiBase, forceRefresh = false) {
     return stored[TOKEN_KEY];
   }
 
-  const response = await fetch(`${apiBase}/auth/bootstrap`, { method: "POST" });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
+  let response;
+  try {
+    response = await fetch(`${apiBase}/auth/bootstrap`, { method: "POST", signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+  }
   if (!response.ok) {
     throw new Error(`TOKEN_BOOTSTRAP_FAILED:${response.status}`);
   }
@@ -259,32 +266,53 @@ async function postSave(payload, token, apiBase) {
 }
 
 async function fetchTagCatalog(apiBase, token) {
-  return await fetch(`${apiBase}/tags`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`
-    }
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(`${apiBase}/tags`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function fetchPostStatus(apiBase, token, tweetId) {
-  return await fetch(`${apiBase}/posts/${encodeURIComponent(tweetId)}`, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${token}`
-    }
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(`${apiBase}/posts/${encodeURIComponent(tweetId)}`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`
+      },
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function updatePost(payload, token, apiBase) {
-  return await fetch(`${apiBase}/posts/${encodeURIComponent(payload?.tweet_id || "")}`, {
-    method: "PUT",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`
-    },
-    body: JSON.stringify(payload)
-  });
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  try {
+    return await fetch(`${apiBase}/posts/${encodeURIComponent(payload?.tweet_id || "")}`, {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 async function safeJson(response) {

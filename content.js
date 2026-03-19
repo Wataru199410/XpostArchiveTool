@@ -1,4 +1,4 @@
-const STYLE_ID = "x-post-archive-inline-style";
+﻿const STYLE_ID = "x-post-archive-inline-style";
 const BUTTON_CLASS = "x-post-archive-inline-save";
 const BUTTON_HOST_ATTR = "data-x-post-archive-save-host";
 const ARTICLE_BOUND_ATTR = "data-x-post-archive-bound";
@@ -240,7 +240,6 @@ async function extractPostData(article) {
   const createdAt = article.querySelector("time")?.getAttribute("datetime") || "";
   if (!createdAt) throw new Error("created_at が見つかりませんでした。");
   const text = article.querySelector("div[data-testid='tweetText']")?.innerText?.trim() || "";
-  if (!text) throw new Error("投稿本文が見つかりませんでした。");
   const handleEl = article.querySelector(`a[href*="/status/${tweetId}"]`) || article.querySelector("a[href*='/status/']");
   const handle = resolveHandle(handleEl?.getAttribute("href"));
   const authorName = article.querySelector("div[dir='ltr'] span")?.textContent?.trim() || handle;
@@ -544,3 +543,4 @@ async function copyText(text) {
 function escapeHtml(value) {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
+
