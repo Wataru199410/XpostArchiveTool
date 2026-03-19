@@ -170,9 +170,6 @@ async function collectPostDataWithPlaywright(url, tweetId) {
       };
     }, { tweetId });
 
-    const screenshotBuffer = await page.screenshot({ fullPage: false, type: "png" });
-    data.screenshot_base64 = `data:image/png;base64,${screenshotBuffer.toString("base64")}`;
-
     return data;
   } finally {
     await context.close();
@@ -270,9 +267,7 @@ async function savePost(payload, token) {
 async function verifySavedArtifacts(dirPath, tweetId) {
   if (!dirPath) throw new Error("dir_path is missing from API response");
 
-  const screenshotPath = path.join(dirPath, "screenshot.png");
   if (!fs.existsSync(dirPath)) throw new Error(`Saved dir not found: ${dirPath}`);
-  if (!fs.existsSync(screenshotPath)) throw new Error(`screenshot.png not found: ${screenshotPath}`);
 }
 
 function sleep(ms) {

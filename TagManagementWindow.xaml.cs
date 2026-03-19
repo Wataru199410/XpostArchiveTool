@@ -40,13 +40,13 @@ public partial class TagManagementWindow : Window
     {
         if (!TryNormalizeTagInput(NewTagTextBox.Text, out var tag))
         {
-            SetStatus("タグには日本語、英数字、空白のみ使用できます。", isError: true);
+            SetStatus("タグには日本語、英字、数字のみ使用できます。30文字以内で入力してください。", isError: true);
             return;
         }
 
         if (TagCatalogStore.LoadCatalog(_archiveRoot).Any(x => string.Equals(x.Name, tag, StringComparison.OrdinalIgnoreCase)))
         {
-            SetStatus("そのタグはすでに存在します。", isError: true);
+            SetStatus("そのタグはすでに登録されています。", isError: true);
             return;
         }
 
@@ -116,5 +116,5 @@ public partial class TagManagementWindow : Window
 
 public sealed record TagManagementItem(string Name, int Count)
 {
-    public string Display => Count == 0 ? "使用中の投稿: 0件" : $"使用中の投稿: {Count}件";
+    public string Display => $"使用中の投稿: {Count}件";
 }

@@ -32,7 +32,7 @@ public partial class MainWindow : Window
         var result = await App.ApiManager.EnsureStartedAsync();
         if (!result.ok)
         {
-            MessageBox.Show(result.message, "API Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            MessageBox.Show(result.message, "API エラー", MessageBoxButton.OK, MessageBoxImage.Error);
         }
 
         LoadSavedPosts();
@@ -95,7 +95,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetMemoStatus("Memo has unsaved changes.");
+        SetMemoStatus("メモは未保存です。");
     }
 
     private void TagFilterList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -103,12 +103,12 @@ public partial class MainWindow : Window
         if (TagFilterList.SelectedItem is not TagFilterItem tag)
         {
             _selectedTag = null;
-            TagSummaryText.Text = "Showing all posts";
+            TagSummaryText.Text = "すべての投稿を表示中";
         }
         else
         {
             _selectedTag = tag.Key == "__ALL__" ? null : tag.Key;
-            TagSummaryText.Text = _selectedTag is null ? "Showing all posts" : $"Tag: {_selectedTag}";
+            TagSummaryText.Text = _selectedTag is null ? "すべての投稿を表示中" : $"タグ: {_selectedTag}";
         }
 
         ApplyFilter();
@@ -195,7 +195,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        SetMemoStatus("Memo saved.", isSuccess: true);
+        SetMemoStatus("メモを保存しました。", isSuccess: true);
         ShowPostDetail(updated);
     }
 
@@ -215,7 +215,7 @@ public partial class MainWindow : Window
             .Select(x => new TagFilterItem { Key = x.Name, Name = x.Name, Count = x.Count })
             .ToList();
 
-        tagCounts.Insert(0, new TagFilterItem { Key = "__ALL__", Name = "All", Count = _allItems.Count });
+        tagCounts.Insert(0, new TagFilterItem { Key = "__ALL__", Name = "すべて", Count = _allItems.Count });
         TagFilterList.ItemsSource = tagCounts;
 
         var selectedIndex = 0;
@@ -252,7 +252,7 @@ public partial class MainWindow : Window
 
         var totalImages = _allItems.Sum(x => x.ImageCount);
         var totalVideos = _allItems.Sum(x => x.VideoCount);
-        ListStatsText.Text = $"{list.Count} / {_allItems.Count} posts | images {totalImages} | videos {totalVideos}";
+        ListStatsText.Text = $"{list.Count} / {_allItems.Count} 件 | 画像 {totalImages} | 動画 {totalVideos}";
 
         if (_selectedItem is not null)
         {
@@ -266,22 +266,22 @@ public partial class MainWindow : Window
         }
 
         PostsCardList.SelectedItem = null;
-        ShowHomeState(list.Count == 0 ? "No matching posts." : "Select a post from the list.");
+        ShowHomeState(list.Count == 0 ? "条件に一致する投稿がありません。" : "左の一覧から投稿を選択してください。");
     }
 
     private void ShowHomeState(string? subTitle = null)
     {
         _selectedItem = null;
-        DetailTitleText.Text = "Post Detail";
-        DetailSubTitleText.Text = subTitle ?? "Select a post from the list.";
-        DetailTweetText.Text = "Post text will appear here.";
-        DetailTagText.Text = "Tags: none";
+        DetailTitleText.Text = "投稿詳細";
+        DetailSubTitleText.Text = subTitle ?? "左の一覧から投稿を選択してください。";
+        DetailTweetText.Text = "投稿本文がここに表示されます。";
+        DetailTagText.Text = "タグ: なし";
         DetailMediaList.ItemsSource = new[]
         {
             new MediaFileItem
             {
                 Type = "info",
-                Display = "Media list will appear here.",
+                Display = "メディア一覧がここに表示されます。",
                 FullPath = string.Empty
             }
         };
@@ -299,8 +299,8 @@ public partial class MainWindow : Window
     {
         _selectedItem = item;
         DetailTitleText.Text = item.Author;
-        DetailSubTitleText.Text = $"Tweet ID: {item.TweetId} | Saved: {item.SavedAt}";
-        DetailTweetText.Text = string.IsNullOrWhiteSpace(item.Text) ? "(no text)" : item.Text;
+        DetailSubTitleText.Text = $"Tweet ID: {item.TweetId} | 保存日時: {item.SavedAt}";
+        DetailTweetText.Text = string.IsNullOrWhiteSpace(item.Text) ? "(本文なし)" : item.Text;
 
         _editableTags.Clear();
         foreach (var tag in item.TagList.Where(x => !string.IsNullOrWhiteSpace(x)))
@@ -321,7 +321,7 @@ public partial class MainWindow : Window
                 new MediaFileItem
                 {
                     Type = "info",
-                    Display = "No saved media.",
+                    Display = "保存済みメディアはありません。",
                     FullPath = string.Empty
                 }
             }
@@ -332,7 +332,7 @@ public partial class MainWindow : Window
     {
         if (_selectedItem is null)
         {
-            return new TagEditSaveResult(false, "No post selected.");
+            return new TagEditSaveResult(false, "投稿が選択されていません。");
         }
 
         if (!SaveSelectedPostChanges(tags.ToList(), DetailNoteTextBox.Text ?? string.Empty, out var updated, out var errorMessage))
@@ -341,9 +341,9 @@ public partial class MainWindow : Window
             return new TagEditSaveResult(false, errorMessage);
         }
 
-        SetTagActionStatus("Tags saved.", isSuccess: true);
+        SetTagActionStatus("タグを保存しました。", isSuccess: true);
         ShowPostDetail(updated);
-        return new TagEditSaveResult(true, "Tags saved.");
+        return new TagEditSaveResult(true, "タグを保存しました。");
     }
 
     private bool SaveSelectedPostChanges(List<string> tags, string note, out PostListItem updated, out string errorMessage)
@@ -353,7 +353,7 @@ public partial class MainWindow : Window
 
         if (_selectedItem is null)
         {
-            errorMessage = "No post selected.";
+            errorMessage = "投稿が選択されていません。";
             return false;
         }
 
@@ -416,8 +416,8 @@ public partial class MainWindow : Window
         DetailTagItems.ItemsSource = null;
         DetailTagItems.ItemsSource = _editableTags.OrderBy(x => x.Name, StringComparer.CurrentCulture).ToList();
         DetailTagText.Text = _editableTags.Count == 0
-            ? "Tags: none"
-            : $"Tags: {string.Join(", ", _editableTags.Select(x => $"#{x.Name}"))}";
+            ? "タグ: なし"
+            : $"タグ: {string.Join(", ", _editableTags.Select(x => $"#{x.Name}"))}";
     }
 
     private void SetTagActionStatus(string text, bool isError = false, bool isSuccess = false)
@@ -445,12 +445,12 @@ public partial class MainWindow : Window
     {
         SortOrderComboBox.ItemsSource = new[]
         {
-            new SortOptionItem("Saved: Newest", SortOption.SavedAtDesc),
-            new SortOptionItem("Saved: Oldest", SortOption.SavedAtAsc),
-            new SortOptionItem("Posted: Newest", SortOption.CreatedAtDesc),
-            new SortOptionItem("Posted: Oldest", SortOption.CreatedAtAsc),
-            new SortOptionItem("Author: A-Z", SortOption.AuthorAsc),
-            new SortOptionItem("Author: Z-A", SortOption.AuthorDesc)
+            new SortOptionItem("保存日時: 新しい順", SortOption.SavedAtDesc),
+            new SortOptionItem("保存日時: 古い順", SortOption.SavedAtAsc),
+            new SortOptionItem("投稿日時: 新しい順", SortOption.CreatedAtDesc),
+            new SortOptionItem("投稿日時: 古い順", SortOption.CreatedAtAsc),
+            new SortOptionItem("投稿者名: A-Z", SortOption.AuthorAsc),
+            new SortOptionItem("投稿者名: Z-A", SortOption.AuthorDesc)
         };
         SortOrderComboBox.SelectedIndex = 0;
     }

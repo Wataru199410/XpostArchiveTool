@@ -78,7 +78,6 @@ app.MapPost("/api/v1/posts", async (SavePostRequest request, IHttpClientFactory 
     Directory.CreateDirectory(Path.Combine(stagingDir, "videos"));
     try
     {
-        await File.WriteAllBytesAsync(Path.Combine(stagingDir, "screenshot.png"), DecodeDataUrlPng(request.screenshot_base64), ct);
         var httpClient = httpClientFactory.CreateClient();
         httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("XPostArchive/1.0");
         var images = new List<MediaRow>();
@@ -175,8 +174,6 @@ static ApiError? ValidateRequest(SavePostRequest request)
     if (string.IsNullOrWhiteSpace(request.author.handle)) return ApiError.BadRequest("AUTHOR_HANDLE_REQUIRED", "author.handle は必須です。");
     if (string.IsNullOrWhiteSpace(request.author.name)) return ApiError.BadRequest("AUTHOR_NAME_REQUIRED", "author.name は必須です。");
     if (string.IsNullOrWhiteSpace(request.created_at)) return ApiError.BadRequest("CREATED_AT_REQUIRED", "created_at は必須です。");
-    if (string.IsNullOrWhiteSpace(request.screenshot_base64)) return ApiError.BadRequest("SCREENSHOT_REQUIRED", "screenshot_base64 は必須です。");
-    if (request.screenshot_base64.Length > 15_000_000) return ApiError.BadRequest("PAYLOAD_TOO_LARGE", "screenshot_base64 が大きすぎます。");
     if (!UrlUtil.IsAllowedPostUrl(request.url)) return ApiError.BadRequest("URL_INVALID", "url は X の投稿 URL を指定してください。");
     foreach (var image in request.images) if (!UrlUtil.IsAllowedImageUrl(image.url)) return ApiError.BadRequest("IMAGE_URL_INVALID", $"許可されていない画像 URL です: {image.url}");
     foreach (var video in request.video_playlists) if (!UrlUtil.IsAllowedVideoUrl(video.m3u8_url)) return ApiError.BadRequest("VIDEO_URL_INVALID", $"許可されていない動画 URL です: {video.m3u8_url}");
@@ -194,13 +191,6 @@ static ApiError? ValidateUpdateRequest(UpdatePostRequest request)
     if (string.IsNullOrWhiteSpace(request.created_at)) return ApiError.BadRequest("CREATED_AT_REQUIRED", "created_at は必須です。");
     if (!UrlUtil.IsAllowedPostUrl(request.url)) return ApiError.BadRequest("URL_INVALID", "url は X の投稿 URL を指定してください。");
     return null;
-}
-
-static byte[] DecodeDataUrlPng(string dataUrl)
-{
-    var idx = dataUrl.IndexOf("base64,", StringComparison.OrdinalIgnoreCase);
-    if (idx < 0) throw new InvalidOperationException("screenshot_base64 は data URL 形式である必要があります。");
-    return Convert.FromBase64String(dataUrl[(idx + 7)..]);
 }
 
 static async Task DownloadFileAsync(HttpClient client, string url, string outPath, CancellationToken ct)
@@ -226,9 +216,9 @@ sealed record AppConfig(string Host, int Port, string StorageRootPath, string Da
     }
 }
 
-sealed record SavePostRequest(string tweet_id, string url, Author author, string created_at, string text, List<string> tags, string? note, string screenshot_base64, List<ImageInput> images, List<VideoPlaylistInput> video_playlists)
+sealed record SavePostRequest(string tweet_id, string url, Author author, string created_at, string text, List<string> tags, string? note, List<ImageInput> images, List<VideoPlaylistInput> video_playlists)
 {
-    public SavePostRequest() : this("", "", new Author("", ""), "", "", [], null, "", [], []) { }
+    public SavePostRequest() : this("", "", new Author("", ""), "", "", [], null, [], []) { }
 }
 sealed record UpdatePostRequest(string tweet_id, string url, Author author, string created_at, string text, List<string> tags, string? note)
 {

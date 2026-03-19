@@ -69,7 +69,7 @@ internal static class DesktopArchiveStore
         var dbPath = TagCatalogStore.ResolveDatabasePath();
         if (!File.Exists(dbPath))
         {
-            errorMessage = "archive.db was not found.";
+            errorMessage = "archive.db が見つかりません。";
             return false;
         }
 
@@ -100,7 +100,7 @@ internal static class DesktopArchiveStore
 
             if (postId is null)
             {
-                errorMessage = "Post record was not found.";
+                errorMessage = "投稿レコードが見つかりません。";
                 return false;
             }
 

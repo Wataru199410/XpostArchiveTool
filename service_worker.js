@@ -110,11 +110,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         throw new Error("TAB_ID_MISSING");
       }
 
-      const screenshot = await chrome.tabs.captureVisibleTab(sender.tab.windowId, {
-        format: "jpeg",
-        quality: 70
-      });
-
       const apiBase = await resolveApiBase();
       let token = await loadOrBootstrapToken(apiBase);
       const videoPlaylists = selectVideoPlaylistsForTweet(
@@ -124,7 +119,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       );
       const payload = {
         ...message.payload,
-        screenshot_base64: screenshot,
         video_playlists: videoPlaylists
       };
 
