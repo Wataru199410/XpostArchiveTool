@@ -5,6 +5,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
+using System.Threading.Channels;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 50 * 1024 * 1024);
@@ -15,7 +16,10 @@ Directory.CreateDirectory(Path.GetFullPath(appConfig.StorageRootPath));
 await Db.InitializeAsync(appConfig.DatabasePath, Path.Combine(AppContext.BaseDirectory, "schema.sql"));
 builder.Services.AddSingleton(appConfig);
 builder.Services.AddHttpClient();
+builder.Services.AddSingleton<VideoDownloadQueue>();
+builder.Services.AddHostedService<VideoDownloadWorker>();
 var app = builder.Build();
+await Db.MarkIncompleteVideoDownloadsInterruptedAsync(appConfig.DatabasePath, CancellationToken.None);
 
 app.Use(async (context, next) =>
 {
@@ -59,7 +63,7 @@ app.MapGet("/api/v1/posts/{tweetId}", async (string tweetId, CancellationToken c
     var existing = await PostStore.LoadByTweetIdAsync(conn, tweetId, ct);
     return existing is null ? Results.Ok(new { ok = true, exists = false }) : Results.Ok(new { ok = true, exists = true, post = existing });
 });
-app.MapPost("/api/v1/posts", async (SavePostRequest request, IHttpClientFactory httpClientFactory, CancellationToken ct) =>
+app.MapPost("/api/v1/posts", async (SavePostRequest request, IHttpClientFactory httpClientFactory, VideoDownloadQueue videoQueue, CancellationToken ct) =>
 {
     var validationError = ValidateRequest(request);
     if (validationError is not null) return Results.BadRequest(validationError);
@@ -92,19 +96,20 @@ app.MapPost("/api/v1/posts", async (SavePostRequest request, IHttpClientFactory 
         }
         for (var i = 0; i < request.video_playlists.Count; i++)
         {
-            var rel = Path.Combine("videos", $"{(i + 1):000}.mp4");
-            var result = await Video.DownloadAsync(appConfig.FfmpegPath, request.video_playlists[i].m3u8_url, Path.Combine(stagingDir, rel), appConfig.VideoRetryCount, ct);
-            if (!result.Ok)
-            {
-                TryDeleteDirectory(stagingDir);
-                return Results.UnprocessableEntity(ApiError.RetryableVideoFail(result.ErrorMessage));
-            }
-            videos.Add(new MediaRow("video", request.video_playlists[i].m3u8_url, rel.Replace('\\', '/'), i));
+            var sourceUrl = request.video_playlists[i].m3u8_url;
+            var rel = Path.Combine("videos", $"{(i + 1):000}.{Video.GetPreferredExtension(sourceUrl)}");
+            videos.Add(new MediaRow("video", sourceUrl, rel.Replace('\\', '/'), i));
         }
         await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
         var authorId = await Db.UpsertAuthorAsync(conn, tx, request.author.handle, request.author.name, savedAt, ct);
         var postId = await Db.InsertPostAsync(conn, tx, request, authorId, createdAt, savedAt, postDir, ct);
-        foreach (var media in images.Concat(videos)) await Db.InsertMediaAsync(conn, tx, postId, media, ct);
+        foreach (var media in images) await Db.InsertMediaAsync(conn, tx, postId, media, "completed", null, ct);
+        var videoJobs = new List<VideoDownloadJob>();
+        foreach (var media in videos)
+        {
+            var mediaId = await Db.InsertMediaAsync(conn, tx, postId, media, "pending", null, ct);
+            videoJobs.Add(new VideoDownloadJob(mediaId, media.original_url ?? string.Empty, Path.Combine(postDir, media.local_path), appConfig.VideoRetryCount));
+        }
         foreach (var rawTag in request.tags.Select(TagUtil.Normalize).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var tagId = await Db.UpsertTagAsync(conn, tx, rawTag, savedAt, ct);
@@ -118,7 +123,11 @@ app.MapPost("/api/v1/posts", async (SavePostRequest request, IHttpClientFactory 
         Directory.Move(stagingDir, postDir);
         finalDirCreated = true;
         await tx.CommitAsync(ct);
-        return Results.Ok(new { ok = true, post_id = postId, dir_path = postDir });
+        foreach (var job in videoJobs)
+        {
+            videoQueue.Enqueue(job);
+        }
+        return Results.Ok(new { ok = true, post_id = postId, dir_path = postDir, background_video_count = videoJobs.Count });
     }
     catch (SqliteException ex) when (ex.SqliteErrorCode == 19)
     {
@@ -210,9 +219,25 @@ sealed record AppConfig(string Host, int Port, string StorageRootPath, string Da
 {
     public static AppConfig From(IConfiguration config)
     {
-        var ffmpegPath = config["Video:FfmpegPath"] ?? "tools/ffmpeg.exe";
-        if (!Path.IsPathRooted(ffmpegPath)) ffmpegPath = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, ffmpegPath));
+        var ffmpegPath = config["Video:FfmpegPath"] ?? "third_party/ffmpeg/ffmpeg.exe";
+        if (!Path.IsPathRooted(ffmpegPath))
+        {
+            ffmpegPath = ResolveRelativePath(ffmpegPath);
+        }
         return new AppConfig(config["Server:Host"] ?? "127.0.0.1", int.TryParse(config["Server:Port"], out var p) ? p : 18765, config["Storage:RootPath"] ?? "./XArchive", config["Database:Path"] ?? "./data/archive.db", config["Auth:TokenFilePath"] ?? "./data/auth_token.txt", ffmpegPath, int.TryParse(config["Video:RetryCount"], out var r) ? r : 2);
+    }
+
+    private static string ResolveRelativePath(string relativePath)
+    {
+        var candidates = new[]
+        {
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, relativePath)),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", relativePath)),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", relativePath)),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", relativePath))
+        };
+
+        return candidates.FirstOrDefault(File.Exists) ?? candidates[0];
     }
 }
 
@@ -228,6 +253,7 @@ sealed record Author(string handle, string name);
 sealed record ImageInput(string url);
 sealed record VideoPlaylistInput(string m3u8_url);
 sealed record MediaRow(string media_type, string? original_url, string local_path, int sort_order);
+sealed record VideoDownloadJob(long media_id, string source_url, string full_path, int retry_count);
 sealed record TagCatalogResponseItem(string name, int count);
 sealed record ExistingPostResponse(long id, string tweet_id, string url, string created_at, string text, string? note, string saved_at, string dir_path, Author author, List<string> tags);
 sealed record ApiError(bool ok, string error_code, string message, bool can_retry = false)
@@ -302,11 +328,28 @@ static class TagUtil
 }
 static class Video
 {
-    public static async Task<(bool Ok, string ErrorMessage)> DownloadAsync(string ffmpegPath, string m3u8Url, string outPath, int retryCount, CancellationToken ct)
+    private static readonly string[] DirectVideoExtensions = ["mp4", "m4v", "mov", "webm", "ts", "mkv"];
+
+    public static async Task<(bool Ok, string ErrorMessage)> DownloadAsync(HttpClient httpClient, string ffmpegPath, string sourceUrl, string outPath, int retryCount, CancellationToken ct)
     {
+        if (IsLikelyDirectVideoUrl(sourceUrl))
+        {
+            try
+            {
+                await DownloadDirectAsync(httpClient, sourceUrl, outPath, ct);
+                return File.Exists(outPath)
+                    ? (true, string.Empty)
+                    : (false, "動画ファイルの保存に失敗しました。");
+            }
+            catch (Exception ex)
+            {
+                return (false, ex.ToString());
+            }
+        }
+
         for (var attempt = 0; attempt <= retryCount; attempt++)
         {
-            var psi = new ProcessStartInfo { FileName = ffmpegPath, Arguments = $"-y -i \"{m3u8Url}\" -c copy \"{outPath}\"", RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
+            var psi = new ProcessStartInfo { FileName = ffmpegPath, Arguments = $"-y -i \"{sourceUrl}\" -c copy \"{outPath}\"", RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
             try
             {
                 using var process = Process.Start(psi);
@@ -323,6 +366,51 @@ static class Video
         }
         return (false, "動画保存に失敗しました。");
     }
+    public static string GetPreferredExtension(string sourceUrl)
+    {
+        if (string.IsNullOrWhiteSpace(sourceUrl))
+        {
+            return "mp4";
+        }
+
+        var extension = UrlUtil.DetectExtension(sourceUrl, "mp4");
+        return DirectVideoExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase) ? extension : "mp4";
+    }
+
+    private static bool IsLikelyDirectVideoUrl(string sourceUrl)
+    {
+        if (string.IsNullOrWhiteSpace(sourceUrl))
+        {
+            return false;
+        }
+
+        var extension = UrlUtil.DetectExtension(sourceUrl, string.Empty);
+        if (DirectVideoExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return !sourceUrl.Contains(".m3u8", StringComparison.OrdinalIgnoreCase)
+            && (sourceUrl.Contains("/ext_tw_video/", StringComparison.OrdinalIgnoreCase)
+                || sourceUrl.Contains("/amplify_video/", StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static async Task DownloadDirectAsync(HttpClient httpClient, string sourceUrl, string outPath, CancellationToken ct)
+    {
+        using var req = new HttpRequestMessage(HttpMethod.Get, sourceUrl);
+        using var res = await httpClient.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct);
+        res.EnsureSuccessStatusCode();
+        var contentType = res.Content.Headers.ContentType?.MediaType ?? string.Empty;
+        if (!contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
+            && !contentType.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"動画ではないレスポンスが返されました: {contentType}");
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(outPath)!);
+        await using var fs = new FileStream(outPath, FileMode.Create, FileAccess.Write, FileShare.None);
+        await using var stream = await res.Content.ReadAsStreamAsync(ct);
+        await stream.CopyToAsync(fs, ct);
+    }
 }
 static class Db
 {
@@ -335,6 +423,7 @@ static class Db
         await using var cmd = conn.CreateCommand();
         cmd.CommandText = await File.ReadAllTextAsync(schemaPath);
         await cmd.ExecuteNonQueryAsync();
+        await EnsureMediaColumnsAsync(conn);
     }
     public static SqliteConnection Open(string dbPath) => new($"Data Source={Path.GetFullPath(dbPath)}");
     public static async Task<bool> PostExistsAsync(SqliteConnection conn, string tweetId, CancellationToken ct)
@@ -376,17 +465,74 @@ static class Db
         cmd.Parameters.AddWithValue("$dir_path", dirPath);
         return (long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
     }
-    public static async Task InsertMediaAsync(SqliteConnection conn, SqliteTransaction tx, long postId, MediaRow media, CancellationToken ct)
+    public static async Task<long> InsertMediaAsync(SqliteConnection conn, SqliteTransaction tx, long postId, MediaRow media, string downloadStatus, string? downloadError, CancellationToken ct)
     {
         await using var cmd = conn.CreateCommand();
         cmd.Transaction = tx;
-        cmd.CommandText = "INSERT INTO media (post_id, media_type, original_url, local_path, sort_order) VALUES ($post_id, $media_type, $original_url, $local_path, $sort_order);";
+        cmd.CommandText = "INSERT INTO media (post_id, media_type, original_url, local_path, download_status, download_error, sort_order) VALUES ($post_id, $media_type, $original_url, $local_path, $download_status, $download_error, $sort_order); SELECT last_insert_rowid();";
         cmd.Parameters.AddWithValue("$post_id", postId);
         cmd.Parameters.AddWithValue("$media_type", media.media_type);
         cmd.Parameters.AddWithValue("$original_url", (object?)media.original_url ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$local_path", media.local_path);
+        cmd.Parameters.AddWithValue("$download_status", downloadStatus);
+        cmd.Parameters.AddWithValue("$download_error", (object?)downloadError ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$sort_order", media.sort_order);
+        return (long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
+    }
+
+    public static async Task UpdateMediaDownloadStateAsync(string dbPath, long mediaId, string downloadStatus, string? downloadError, CancellationToken ct)
+    {
+        await using var conn = Open(dbPath);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = "UPDATE media SET download_status = $download_status, download_error = $download_error WHERE id = $id";
+        cmd.Parameters.AddWithValue("$id", mediaId);
+        cmd.Parameters.AddWithValue("$download_status", downloadStatus);
+        cmd.Parameters.AddWithValue("$download_error", (object?)downloadError ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    public static async Task MarkIncompleteVideoDownloadsInterruptedAsync(string dbPath, CancellationToken ct)
+    {
+        await using var conn = Open(dbPath);
+        await conn.OpenAsync(ct);
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+UPDATE media
+SET download_status = 'failed',
+    download_error = 'アプリの終了により動画保存が中断されました。'
+WHERE media_type = 'video'
+  AND download_status IN ('pending', 'downloading');";
+        await cmd.ExecuteNonQueryAsync(ct);
+    }
+
+    private static async Task EnsureMediaColumnsAsync(SqliteConnection conn)
+    {
+        await using var pragma = conn.CreateCommand();
+        pragma.CommandText = "PRAGMA table_info(media);";
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await pragma.ExecuteReaderAsync();
+        while (await reader.ReadAsync())
+        {
+            if (!reader.IsDBNull(1))
+            {
+                columns.Add(reader.GetString(1));
+            }
+        }
+
+        if (!columns.Contains("download_status"))
+        {
+            await using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE media ADD COLUMN download_status TEXT NOT NULL DEFAULT 'completed';";
+            await alter.ExecuteNonQueryAsync();
+        }
+
+        if (!columns.Contains("download_error"))
+        {
+            await using var alter = conn.CreateCommand();
+            alter.CommandText = "ALTER TABLE media ADD COLUMN download_error TEXT NULL;";
+            await alter.ExecuteNonQueryAsync();
+        }
     }
     public static async Task<long> UpsertTagAsync(SqliteConnection conn, SqliteTransaction tx, string tag, DateTimeOffset now, CancellationToken ct)
     {
@@ -480,5 +626,87 @@ static class PostStore
             }
         }
         return new ExistingPostResponse(postId, reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.IsDBNull(4) ? string.Empty : reader.GetString(4), reader.IsDBNull(5) ? null : reader.GetString(5), reader.GetString(6), reader.GetString(7), new Author(reader.GetString(8), reader.GetString(9)), tags);
+    }
+}
+sealed class VideoDownloadQueue
+{
+    private readonly Channel<VideoDownloadJob> _channel = Channel.CreateUnbounded<VideoDownloadJob>();
+
+    public void Enqueue(VideoDownloadJob job) => _channel.Writer.TryWrite(job);
+
+    public IAsyncEnumerable<VideoDownloadJob> ReadAllAsync(CancellationToken ct) => _channel.Reader.ReadAllAsync(ct);
+}
+
+sealed class VideoDownloadWorker : BackgroundService
+{
+    private readonly VideoDownloadQueue _queue;
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly AppConfig _appConfig;
+
+    public VideoDownloadWorker(VideoDownloadQueue queue, IHttpClientFactory httpClientFactory, AppConfig appConfig)
+    {
+        _queue = queue;
+        _httpClientFactory = httpClientFactory;
+        _appConfig = appConfig;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        await foreach (var job in _queue.ReadAllAsync(stoppingToken))
+        {
+            try
+            {
+                await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "downloading", null, stoppingToken);
+                var client = _httpClientFactory.CreateClient();
+                client.DefaultRequestHeaders.UserAgent.ParseAdd("XPostArchive/1.0");
+                var result = await Video.DownloadAsync(client, _appConfig.FfmpegPath, job.source_url, job.full_path, job.retry_count, stoppingToken);
+                if (result.Ok)
+                {
+                    await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "completed", null, stoppingToken);
+                }
+                else
+                {
+                    DeletePartialFile(job.full_path);
+                    await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "failed", result.ErrorMessage, stoppingToken);
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                DeletePartialFile(job.full_path);
+                try
+                {
+                    await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "failed", "アプリの終了により動画保存が中断されました。", CancellationToken.None);
+                }
+                catch
+                {
+                }
+                throw;
+            }
+            catch (Exception ex)
+            {
+                DeletePartialFile(job.full_path);
+                try
+                {
+                    await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "failed", ex.Message, CancellationToken.None);
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
+
+    private static void DeletePartialFile(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+        }
     }
 }

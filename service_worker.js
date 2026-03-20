@@ -3,7 +3,7 @@
   "http://localhost:18765/api/v1"
 ];
 const TOKEN_KEY = "x_post_archive_token";
-const FETCH_TIMEOUT_MS = 180000;
+const FETCH_TIMEOUT_MS = 600000;
 const m3u8ByTab = new Map();
 const MAX_M3U8_PER_TAB = 80;
 const MAX_VIDEO_PLAYLISTS_PER_SAVE = 5;
@@ -17,7 +17,10 @@ chrome.webRequest.onBeforeRequest.addListener(
       m3u8ByTab.set(details.tabId, []);
       return;
     }
-    if (!details.url.includes(".m3u8")) return;
+    const isM3u8 = details.url.includes(".m3u8");
+    const isDirectVideoFile = /\.(mp4|m4v|mov|webm|ts|mkv)(\?|$)/i.test(details.url);
+    const isKnownVideoPath = /\/(ext_tw_video|amplify_video)\//i.test(details.url);
+    if (!isM3u8 && !(isDirectVideoFile && isKnownVideoPath)) return;
 
     const items = m3u8ByTab.get(details.tabId) ?? [];
     items.push({
@@ -115,12 +118,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const videoPlaylists = selectVideoPlaylistsForTweet(
         tabId,
         message.payload?.url,
-        message.payload?.tweet_id
+        message.payload?.tweet_id,
+        message.payload?.video_context
       );
       const payload = {
         ...message.payload,
         video_playlists: videoPlaylists
       };
+      delete payload.video_context;
 
       const payloadBytes = byteLengthUtf8(JSON.stringify(payload));
       let response = await postSave(payload, token, apiBase);
@@ -144,13 +149,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     } catch (error) {
       const health = await checkApiHealthAny();
+      const message = error?.name === "AbortError"
+        ? "REQUEST_TIMEOUT: 動画保存に時間がかかり、拡張の待機時間を超えました。"
+        : String(error);
       sendResponse({
         ok: false,
         status: 0,
         body: {
           ok: false,
           error_code: "EXTENSION_ERROR",
-          message: String(error),
+          message,
           can_retry: true,
           debug: {
             api_base: health.apiBase,
@@ -325,13 +333,22 @@ function byteLengthUtf8(text) {
   return new TextEncoder().encode(text).length;
 }
 
-function selectVideoPlaylistsForTweet(tabId, tweetUrl, tweetIdFromPayload) {
+function selectVideoPlaylistsForTweet(tabId, tweetUrl, tweetIdFromPayload, videoContext) {
   const tweetId = tweetIdFromPayload || extractTweetId(tweetUrl || "");
   if (!tweetId) return [];
 
   const marker = `/status/${tweetId}`;
   const now = Date.now();
   const seen = new Set();
+  const output = [];
+
+  for (const candidateUrl of normalizeDirectVideoCandidates(videoContext)) {
+    if (seen.has(candidateUrl)) continue;
+    seen.add(candidateUrl);
+    output.push({ m3u8_url: candidateUrl });
+    if (output.length >= MAX_VIDEO_PLAYLISTS_PER_SAVE) return output;
+  }
+
   const items = m3u8ByTab.get(tabId) ?? [];
   const normalized = items
     .map((item) => (typeof item === "string"
@@ -339,22 +356,66 @@ function selectVideoPlaylistsForTweet(tabId, tweetUrl, tweetIdFromPayload) {
       : item))
     .filter((item) => typeof item?.m3u8_url === "string");
 
-  const filtered = normalized.filter((item) => {
+  const recentItems = normalized.filter((item) => {
     const recent = now - (item.captured_at || 0) <= M3U8_MAX_AGE_MS;
-    const related =
-      (item.page_url || "").includes(marker) ||
-      (item.m3u8_url || "").includes(tweetId);
-    return recent && related;
+    return recent;
   });
 
-  const output = [];
-  for (const item of filtered) {
+  const filtered = recentItems.filter((item) =>
+    (item.page_url || "").includes(marker) ||
+    (item.m3u8_url || "").includes(tweetId)
+  );
+
+  const candidates = filtered.length > 0
+    ? filtered
+    : recentItems
+        .slice()
+        .sort((a, b) => (b.captured_at || 0) - (a.captured_at || 0))
+        .slice(0, MAX_VIDEO_PLAYLISTS_PER_SAVE);
+
+  for (const item of candidates) {
     if (seen.has(item.m3u8_url)) continue;
     seen.add(item.m3u8_url);
     output.push({ m3u8_url: item.m3u8_url });
     if (output.length >= MAX_VIDEO_PLAYLISTS_PER_SAVE) break;
   }
   return output;
+}
+
+function normalizeDirectVideoCandidates(videoContext) {
+  const values = Array.isArray(videoContext?.candidate_urls) ? videoContext.candidate_urls : [];
+  const normalized = [];
+  const seen = new Set();
+
+  for (const value of values) {
+    const url = String(value || "").trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+
+    if (!/^https:/i.test(url)) continue;
+
+    let parsed;
+    try {
+      parsed = new URL(url);
+    } catch {
+      continue;
+    }
+
+    const host = parsed.host.toLowerCase();
+    if (!(host === "video.twimg.com" || host.endsWith(".twimg.com"))) continue;
+
+    const path = parsed.pathname.toLowerCase();
+    const isLikelyVideo =
+      path.endsWith(".m3u8") ||
+      /\.(mp4|m4v|mov|webm|ts|mkv)$/i.test(path) ||
+      path.includes("/ext_tw_video/") ||
+      path.includes("/amplify_video/");
+    if (!isLikelyVideo) continue;
+
+    normalized.push(url);
+  }
+
+  return normalized;
 }
 
 function extractTweetId(url) {

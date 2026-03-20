@@ -168,12 +168,14 @@ async function onInlineSaveClick(article, button) {
     payload.tags = formResult.tags;
     payload.note = formResult.note;
     if (postStatus.exists) {
-      await saveOrUpdate("UPDATE_POST", payload, button, "上書き保存中...", "上書き保存しました", "投稿内容、メモ、タグを更新しました。");
+      const responseBody = await saveOrUpdate("UPDATE_POST", payload, button, "上書き保存中...", "上書き保存しました", "投稿内容、メモ、タグを更新しました。");
+      showSuccessToast("上書き保存しました", buildBackgroundVideoSuccessText(responseBody, "投稿内容、メモ、タグを更新しました。"));
       postStatusCache.set(payload.tweet_id, { exists: true, post: { ...payload } });
       flashSaved(button, true);
       return;
     }
-    await saveOrUpdate("SAVE_POST", payload, button, "保存中...", "保存しました", "投稿を保存しました。");
+    const responseBody = await saveOrUpdate("SAVE_POST", payload, button, "保存中...", "保存しました", "投稿を保存しました。");
+    showSuccessToast("保存しました", buildBackgroundVideoSuccessText(responseBody, "投稿を保存しました。"));
     postStatusCache.set(payload.tweet_id, { exists: true, post: { ...payload } });
     flashSaved(button, true);
   } catch (error) {
@@ -202,14 +204,22 @@ async function saveOrUpdate(type, payload, button, progressLabel, successTitle, 
           await showResultDialog("再試行に失敗しました", buildErrorDetail(retryResult, payload), true);
           throw new Error("RETRY_FAILED");
         }
-        showSuccessToast(successTitle, successText);
-        return;
+        return retryResult.body || {};
       }
     }
     await showResultDialog(type === "UPDATE_POST" ? "上書き保存に失敗しました" : "保存に失敗しました", detail, true);
     throw new Error("SAVE_OR_UPDATE_FAILED");
   }
-  showSuccessToast(successTitle, successText);
+  return result.body || {};
+}
+
+function buildBackgroundVideoSuccessText(responseBody, baseText) {
+  const backgroundCount = Number(responseBody?.background_video_count || 0);
+  if (backgroundCount <= 0) {
+    return baseText;
+  }
+
+  return `${baseText}\n動画はバックグラウンドで保存中です。\nアプリを閉じると動画保存は中断されます。`;
 }
 
 function normalizeTagCatalog(tags) {
@@ -244,7 +254,50 @@ async function extractPostData(article) {
   const handle = resolveHandle(handleEl?.getAttribute("href"));
   const authorName = article.querySelector("div[dir='ltr'] span")?.textContent?.trim() || handle;
   const imageUrls = [...article.querySelectorAll("img")].map((img) => img.getAttribute("src") || "").filter((src) => src.includes("twimg.com/media")).map((urlValue) => ({ url: urlValue })).slice(0, 10);
-  return { tweet_id: tweetId, url, author: { handle, name: authorName }, created_at: createdAt, text, tags: [], note: "", images: imageUrls };
+  const videoContext = collectVideoContext(article);
+  return {
+    tweet_id: tweetId,
+    url,
+    author: { handle, name: authorName },
+    created_at: createdAt,
+    text,
+    tags: [],
+    note: "",
+    images: imageUrls,
+    video_context: videoContext
+  };
+}
+
+function collectVideoContext(article) {
+  const candidateUrls = [];
+  const seen = new Set();
+  const videos = [...article.querySelectorAll("video")];
+
+  const pushCandidate = (value) => {
+    const url = String(value || "").trim();
+    if (!url || seen.has(url)) return;
+    seen.add(url);
+    candidateUrls.push(url);
+  };
+
+  for (const video of videos) {
+    pushCandidate(video.currentSrc);
+    pushCandidate(video.src);
+    for (const source of video.querySelectorAll("source")) {
+      pushCandidate(source.getAttribute("src"));
+    }
+  }
+
+  const hasVideo =
+    videos.length > 0 ||
+    !!article.querySelector("[data-testid='videoPlayer']") ||
+    !!article.querySelector("div[aria-label*='動画']") ||
+    !!article.querySelector("div[aria-label*='Video']");
+
+  return {
+    has_video: hasVideo,
+    candidate_urls: candidateUrls.slice(0, 6)
+  };
 }
 
 function resolveTweetIdFromArticle(article) {

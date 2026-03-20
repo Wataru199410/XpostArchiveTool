@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
@@ -16,15 +17,18 @@ public partial class MainWindow : Window
     private List<PostListItem> _allItems = [];
     private List<TagCatalogItem> _tagCatalog = [];
     private readonly List<EditableTagItem> _editableTags = [];
-    private string? _selectedTag;
+    private readonly HashSet<string> _selectedTags = new(StringComparer.OrdinalIgnoreCase);
+    private string? _selectedSpecialFilter;
     private PostListItem? _selectedItem;
     private SortOption _selectedSort = SortOption.SavedAtDesc;
+    private bool _isUpdatingTagFilterSelection;
 
     public MainWindow()
     {
         InitializeComponent();
         InitializeSortOptions();
         Loaded += MainWindow_Loaded;
+        Closing += MainWindow_Closing;
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -37,6 +41,24 @@ public partial class MainWindow : Window
 
         LoadSavedPosts();
         ShowHomeState();
+    }
+
+    private void MainWindow_Closing(object? sender, CancelEventArgs e)
+    {
+        var activeDownloads = DesktopArchiveStore.GetActiveVideoDownloadCount();
+        if (activeDownloads <= 0)
+        {
+            return;
+        }
+
+        var message = activeDownloads == 1
+            ? "動画を1件保存中です。アプリを終了すると中断されます。終了しますか？"
+            : $"動画を{activeDownloads}件保存中です。アプリを終了すると中断されます。終了しますか？";
+        var result = MessageBox.Show(message, "動画保存中", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        if (result != MessageBoxResult.Yes)
+        {
+            e.Cancel = true;
+        }
     }
 
     private void ReloadPosts_Click(object sender, RoutedEventArgs e)
@@ -61,15 +83,14 @@ public partial class MainWindow : Window
     private void Home_Click(object sender, RoutedEventArgs e)
     {
         SearchBox.Text = string.Empty;
-        _selectedTag = null;
-        if (TagFilterList.Items.Count > 0)
-        {
-            TagFilterList.SelectedIndex = 0;
-        }
+        _selectedTags.Clear();
+        _selectedSpecialFilter = null;
+        SetTagFilterSelectionSilently(() => TagFilterList.UnselectAll());
 
         _selectedItem = null;
         PostsCardList.SelectedItem = null;
         ShowHomeState();
+        UpdateTagSummary();
         ApplyFilter();
     }
 
@@ -100,18 +121,29 @@ public partial class MainWindow : Window
 
     private void TagFilterList_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (TagFilterList.SelectedItem is not TagFilterItem tag)
+        if (_isUpdatingTagFilterSelection)
         {
-            _selectedTag = null;
-            TagSummaryText.Text = "すべての投稿を表示中";
-        }
-        else
-        {
-            _selectedTag = tag.Key == "__ALL__" ? null : tag.Key;
-            TagSummaryText.Text = _selectedTag is null ? "すべての投稿を表示中" : $"タグ: {_selectedTag}";
+            return;
         }
 
+        NormalizeTagSelection(e);
+        SyncSelectedTagsFromUi();
+        UpdateTagSummary();
         ApplyFilter();
+    }
+
+    private void TagFilterListItem_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not ListBoxItem item || !item.IsSelected)
+        {
+            return;
+        }
+
+        SetTagFilterSelectionSilently(() => TagFilterList.SelectedItems.Remove(item.DataContext));
+        SyncSelectedTagsFromUi();
+        UpdateTagSummary();
+        ApplyFilter();
+        e.Handled = true;
     }
 
     private void PostsCardList_SelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -212,20 +244,54 @@ public partial class MainWindow : Window
         var tagCounts = _tagCatalog
             .OrderByDescending(x => x.Count)
             .ThenBy(x => x.Name, StringComparer.CurrentCulture)
-            .Select(x => new TagFilterItem { Key = x.Name, Name = x.Name, Count = x.Count })
+            .Select(x => new TagFilterItem
+            {
+                Key = x.Name,
+                Name = x.Name,
+                Count = x.Count
+            })
             .ToList();
 
-        tagCounts.Insert(0, new TagFilterItem { Key = "__ALL__", Name = "すべて", Count = _allItems.Count });
+        tagCounts.Insert(0, new TagFilterItem
+        {
+            Key = "__UNTAGGED__",
+            Name = "絞り込み: タグなし",
+            Count = _allItems.Count(x => x.TagList.Count == 0),
+            IsSpecial = true
+        });
+        tagCounts.Insert(0, new TagFilterItem
+        {
+            Key = "__ALL__",
+            Name = "絞り込み: すべて",
+            Count = _allItems.Count,
+            IsSpecial = true
+        });
+
         TagFilterList.ItemsSource = tagCounts;
 
-        var selectedIndex = 0;
-        if (!string.IsNullOrWhiteSpace(_selectedTag))
+        SetTagFilterSelectionSilently(() =>
         {
-            var selected = tagCounts.FindIndex(x => string.Equals(x.Key, _selectedTag, StringComparison.OrdinalIgnoreCase));
-            selectedIndex = selected >= 0 ? selected : 0;
-        }
+            TagFilterList.UnselectAll();
 
-        TagFilterList.SelectedIndex = selectedIndex;
+            if (string.Equals(_selectedSpecialFilter, "__UNTAGGED__", StringComparison.Ordinal))
+            {
+                var untagged = tagCounts.FirstOrDefault(x => x.Key == "__UNTAGGED__");
+                if (untagged is not null)
+                {
+                    TagFilterList.SelectedItems.Add(untagged);
+                }
+            }
+            else
+            {
+                foreach (var tag in tagCounts.Where(x => !x.IsSpecial && _selectedTags.Contains(x.Key)))
+                {
+                    TagFilterList.SelectedItems.Add(tag);
+                }
+            }
+        });
+
+        SyncSelectedTagsFromUi();
+        UpdateTagSummary();
     }
 
     private void ApplyFilter()
@@ -233,9 +299,15 @@ public partial class MainWindow : Window
         var keyword = (SearchBox.Text ?? string.Empty).Trim();
 
         IEnumerable<PostListItem> query = _allItems;
-        if (!string.IsNullOrWhiteSpace(_selectedTag))
+        if (string.Equals(_selectedSpecialFilter, "__UNTAGGED__", StringComparison.Ordinal))
         {
-            query = query.Where(x => x.TagList.Any(t => string.Equals(t, _selectedTag, StringComparison.OrdinalIgnoreCase)));
+            query = query.Where(x => x.TagList.Count == 0);
+        }
+        else if (_selectedTags.Count > 0)
+        {
+            query = query.Where(x =>
+                _selectedTags.All(selectedTag =>
+                    x.TagList.Any(t => string.Equals(t, selectedTag, StringComparison.OrdinalIgnoreCase))));
         }
 
         if (!string.IsNullOrWhiteSpace(keyword))
@@ -468,6 +540,87 @@ public partial class MainWindow : Window
             _ => items
         };
     }
+
+    private void NormalizeTagSelection(SelectionChangedEventArgs e)
+    {
+        var selectedItems = TagFilterList.SelectedItems.Cast<TagFilterItem>().ToList();
+        if (selectedItems.Count == 0)
+        {
+            return;
+        }
+
+        var addedSpecial = e.AddedItems.OfType<TagFilterItem>().LastOrDefault(x => x.IsSpecial);
+        if (addedSpecial is not null)
+        {
+            SetTagFilterSelectionSilently(() =>
+            {
+                TagFilterList.UnselectAll();
+                TagFilterList.SelectedItems.Add(addedSpecial);
+            });
+            return;
+        }
+
+        var selectedRegulars = selectedItems.Where(x => !x.IsSpecial).ToList();
+        if (selectedRegulars.Count > 0 && selectedItems.Any(x => x.IsSpecial))
+        {
+            SetTagFilterSelectionSilently(() =>
+            {
+                TagFilterList.UnselectAll();
+                foreach (var item in selectedRegulars)
+                {
+                    TagFilterList.SelectedItems.Add(item);
+                }
+            });
+        }
+    }
+
+    private void SetTagFilterSelectionSilently(Action action)
+    {
+        _isUpdatingTagFilterSelection = true;
+        try
+        {
+            action();
+        }
+        finally
+        {
+            _isUpdatingTagFilterSelection = false;
+        }
+    }
+
+    private void SyncSelectedTagsFromUi()
+    {
+        _selectedTags.Clear();
+        _selectedSpecialFilter = null;
+
+        foreach (var item in TagFilterList.SelectedItems.Cast<TagFilterItem>())
+        {
+            if (item.IsSpecial)
+            {
+                _selectedSpecialFilter = item.Key;
+            }
+            else
+            {
+                _selectedTags.Add(item.Key);
+            }
+        }
+    }
+
+    private void UpdateTagSummary()
+    {
+        if (string.Equals(_selectedSpecialFilter, "__UNTAGGED__", StringComparison.Ordinal))
+        {
+            TagSummaryText.Text = "タグなしの投稿を表示中";
+            return;
+        }
+
+        if (_selectedTags.Count == 0)
+        {
+            TagSummaryText.Text = "すべての投稿を表示中";
+            return;
+        }
+
+        TagSummaryText.Text = $"タグ: {string.Join("・", _selectedTags.OrderBy(x => x, StringComparer.CurrentCulture))} をすべて含む";
+    }
 }
 
 public sealed class PostListItem
@@ -486,6 +639,8 @@ public sealed class PostListItem
     public string ThumbnailPath { get; init; } = string.Empty;
     public List<MediaFileItem> MediaFiles { get; init; } = [];
     public string Note { get; init; } = string.Empty;
+    public string VideoStatusText { get; init; } = string.Empty;
+    public bool HasActiveVideoDownload { get; init; }
 }
 
 public sealed class TagFilterItem
@@ -493,6 +648,7 @@ public sealed class TagFilterItem
     public string Key { get; init; } = string.Empty;
     public string Name { get; init; } = string.Empty;
     public int Count { get; init; }
+    public bool IsSpecial { get; init; }
     public string Display => $"{Name} ({Count})";
 }
 
@@ -501,6 +657,15 @@ public sealed class MediaFileItem
     public string Type { get; init; } = string.Empty;
     public string Display { get; init; } = string.Empty;
     public string FullPath { get; init; } = string.Empty;
+    public string DownloadStatus { get; init; } = "completed";
+    public string DownloadError { get; init; } = string.Empty;
+    public string StatusText => DownloadStatus switch
+    {
+        "pending" => "動画は保存待ちです",
+        "downloading" => "動画をバックグラウンドで保存中です",
+        "failed" => string.IsNullOrWhiteSpace(DownloadError) ? "動画保存に失敗しました" : $"動画保存に失敗しました: {DownloadError}",
+        _ => "動画保存済み"
+    };
 }
 
 public sealed class EditableTagItem

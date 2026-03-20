@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS media (
   media_type   TEXT    NOT NULL CHECK (media_type IN ('image','video')),
   original_url TEXT    NULL,
   local_path   TEXT    NOT NULL,
+  download_status TEXT NOT NULL DEFAULT 'completed',
+  download_error  TEXT NULL,
   sort_order   INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY (post_id) REFERENCES posts(id) ON DELETE CASCADE
 );

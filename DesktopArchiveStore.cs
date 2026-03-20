@@ -30,7 +30,8 @@ internal static class DesktopArchiveStore
                     tagList ??= [];
                     mediaFiles ??= [];
 
-                    var thumbnailPath = mediaFiles.FirstOrDefault(x => x.Type == "image")?.FullPath ?? string.Empty;
+                    var thumbnailPath = mediaFiles.FirstOrDefault(x => x.Type == "image" && File.Exists(x.FullPath))?.FullPath ?? string.Empty;
+                    var videoStatus = BuildVideoStatusText(mediaFiles);
 
                     return new PostListItem
                     {
@@ -41,7 +42,7 @@ internal static class DesktopArchiveStore
                             ? post.AuthorHandle
                             : $"{post.AuthorName} ({post.AuthorHandle})",
                         Text = post.Text ?? string.Empty,
-                        Tags = tagList.Count > 0 ? string.Join(", ", tagList) : "(なし)",
+                        Tags = tagList.Count > 0 ? string.Join(", ", tagList) : "タグなし",
                         TagList = tagList,
                         TweetId = post.TweetId,
                         DirPath = post.DirPath,
@@ -49,7 +50,9 @@ internal static class DesktopArchiveStore
                         VideoCount = mediaFiles.Count(x => x.Type == "video"),
                         ThumbnailPath = thumbnailPath,
                         MediaFiles = mediaFiles,
-                        Note = post.Note ?? string.Empty
+                        Note = post.Note ?? string.Empty,
+                        VideoStatusText = videoStatus,
+                        HasActiveVideoDownload = mediaFiles.Any(x => x.Type == "video" && (x.DownloadStatus == "pending" || x.DownloadStatus == "downloading"))
                     };
                 })
                 .OrderByDescending(x => x.SavedAtSortValue)
@@ -60,6 +63,21 @@ internal static class DesktopArchiveStore
         {
             return [];
         }
+    }
+
+    public static int GetActiveVideoDownloadCount()
+    {
+        var dbPath = TagCatalogStore.ResolveDatabasePath();
+        if (!File.Exists(dbPath))
+        {
+            return 0;
+        }
+
+        using var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(1) FROM media WHERE media_type = 'video' AND COALESCE(download_status, 'completed') IN ('pending', 'downloading')";
+        return Convert.ToInt32(cmd.ExecuteScalar() ?? 0);
     }
 
     public static bool SavePostChanges(string dirPath, IEnumerable<string> tags, string note, out string errorMessage)
@@ -234,7 +252,7 @@ ORDER BY pt.post_id, t.name COLLATE NOCASE ASC;";
     {
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
-SELECT m.post_id, m.media_type, m.local_path, p.dir_path
+SELECT m.post_id, m.media_type, m.local_path, p.dir_path, COALESCE(m.download_status, 'completed'), m.download_error
 FROM media m
 JOIN posts p ON p.id = m.post_id
 ORDER BY m.post_id, m.sort_order ASC;";
@@ -253,15 +271,41 @@ ORDER BY m.post_id, m.sort_order ASC;";
             var mediaType = reader.GetString(1);
             var localPath = reader.GetString(2);
             var dirPath = reader.GetString(3);
+            var downloadStatus = reader.IsDBNull(4) ? "completed" : reader.GetString(4);
+            var downloadError = reader.IsDBNull(5) ? string.Empty : reader.GetString(5);
+
             list.Add(new MediaFileItem
             {
                 Type = mediaType,
                 Display = mediaType == "video" ? $"[video] {localPath}" : $"[image] {localPath}",
-                FullPath = Path.GetFullPath(Path.Combine(dirPath, localPath))
+                FullPath = Path.GetFullPath(Path.Combine(dirPath, localPath)),
+                DownloadStatus = downloadStatus,
+                DownloadError = downloadError
             });
         }
 
         return media;
+    }
+
+    private static string BuildVideoStatusText(List<MediaFileItem> mediaFiles)
+    {
+        var videos = mediaFiles.Where(x => x.Type == "video").ToList();
+        if (videos.Count == 0)
+        {
+            return string.Empty;
+        }
+
+        if (videos.Any(x => x.DownloadStatus == "pending" || x.DownloadStatus == "downloading"))
+        {
+            return "動画をバックグラウンドで保存中";
+        }
+
+        if (videos.Any(x => x.DownloadStatus == "failed"))
+        {
+            return "動画保存に失敗した項目があります";
+        }
+
+        return "動画保存済み";
     }
 
     private sealed record PostRow(
