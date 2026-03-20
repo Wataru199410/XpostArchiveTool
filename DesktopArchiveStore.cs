@@ -41,7 +41,7 @@ internal static class DesktopArchiveStore
                             ? post.AuthorHandle
                             : $"{post.AuthorName} ({post.AuthorHandle})",
                         Text = post.Text ?? string.Empty,
-                        Tags = tagList.Count > 0 ? string.Join(", ", tagList) : "(none)",
+                        Tags = tagList.Count > 0 ? string.Join(", ", tagList) : "(なし)",
                         TagList = tagList,
                         TweetId = post.TweetId,
                         DirPath = post.DirPath,
