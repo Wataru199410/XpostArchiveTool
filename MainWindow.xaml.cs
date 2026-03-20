@@ -172,6 +172,16 @@ public partial class MainWindow : Window
         ShowPostDetail(item);
     }
 
+    private void CardOpenQuotedPost_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not PostListItem item)
+        {
+            return;
+        }
+
+        OpenQuotedPost(item);
+    }
+
     private void ManageTags_Click(object sender, RoutedEventArgs e)
     {
         var selectedDirPath = _selectedItem?.DirPath;
@@ -347,6 +357,7 @@ public partial class MainWindow : Window
         DetailTitleText.Text = "投稿詳細";
         DetailSubTitleText.Text = subTitle ?? "左の一覧から投稿を選択してください。";
         DetailTweetText.Text = "投稿本文がここに表示されます。";
+        OpenQuotedPostButton.Visibility = Visibility.Collapsed;
         DetailTagText.Text = "タグ: なし";
         DetailMediaList.ItemsSource = new[]
         {
@@ -373,6 +384,8 @@ public partial class MainWindow : Window
         DetailTitleText.Text = item.Author;
         DetailSubTitleText.Text = $"Tweet ID: {item.TweetId} | 保存日時: {item.SavedAt}";
         DetailTweetText.Text = string.IsNullOrWhiteSpace(item.Text) ? "(本文なし)" : item.Text;
+        OpenQuotedPostButton.Visibility = string.IsNullOrWhiteSpace(item.QuotedTweetId) ? Visibility.Collapsed : Visibility.Visible;
+        OpenQuotedPostButton.Content = "引用元の投稿を開く";
 
         _editableTags.Clear();
         foreach (var tag in item.TagList.Where(x => !string.IsNullOrWhiteSpace(x)))
@@ -398,6 +411,35 @@ public partial class MainWindow : Window
                 }
             }
             : item.MediaFiles;
+    }
+
+    private void OpenQuotedPost_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedItem is null)
+        {
+            return;
+        }
+
+        OpenQuotedPost(_selectedItem);
+    }
+
+    private void OpenQuotedPost(PostListItem item)
+    {
+        if (string.IsNullOrWhiteSpace(item.QuotedTweetId))
+        {
+            return;
+        }
+
+        var quotedItem = _allItems.FirstOrDefault(x => string.Equals(x.TweetId, item.QuotedTweetId, StringComparison.Ordinal));
+        if (quotedItem is null)
+        {
+            MessageBox.Show("引用元の投稿が一覧に見つかりません。", "投稿が見つかりません", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        PostsCardList.SelectedItem = quotedItem;
+        PostsCardList.ScrollIntoView(quotedItem);
+        ShowPostDetail(quotedItem);
     }
 
     private TagEditSaveResult ApplyTagsFromEditor(IReadOnlyList<string> tags)
@@ -641,6 +683,10 @@ public sealed class PostListItem
     public string Note { get; init; } = string.Empty;
     public string VideoStatusText { get; init; } = string.Empty;
     public bool HasActiveVideoDownload { get; init; }
+    public string QuotedTweetId { get; init; } = string.Empty;
+    public string QuotedAuthor { get; init; } = string.Empty;
+    public string QuotedText { get; init; } = string.Empty;
+    public bool HasQuotedPost => !string.IsNullOrWhiteSpace(QuotedTweetId);
 }
 
 public sealed class TagFilterItem

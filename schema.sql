@@ -13,12 +13,14 @@ CREATE TABLE IF NOT EXISTS posts (
   tweet_id   TEXT    NOT NULL UNIQUE,
   url        TEXT    NOT NULL,
   author_id  INTEGER NOT NULL,
+  quoted_post_id INTEGER NULL,
   created_at TEXT    NOT NULL,
   text       TEXT    NOT NULL,
   note       TEXT    NULL,
   saved_at   TEXT    NOT NULL,
   dir_path   TEXT    NOT NULL,
-  FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE RESTRICT
+  FOREIGN KEY (author_id) REFERENCES authors(id) ON DELETE RESTRICT,
+  FOREIGN KEY (quoted_post_id) REFERENCES posts(id) ON DELETE SET NULL
 );
 
 CREATE TABLE IF NOT EXISTS media (

@@ -167,6 +167,11 @@ async function onInlineSaveClick(article, button) {
     }
     payload.tags = formResult.tags;
     payload.note = formResult.note;
+    if (payload.quoted_post) {
+      await ensureQuotedPostSaved(payload.quoted_post);
+      payload.quoted_tweet_id = payload.quoted_post.tweet_id;
+      delete payload.quoted_post;
+    }
     if (postStatus.exists) {
       const responseBody = await saveOrUpdate("UPDATE_POST", payload, button, "上書き保存中...", "上書き保存しました", "投稿内容、メモ、タグを更新しました。");
       showSuccessToast("上書き保存しました", buildBackgroundVideoSuccessText(responseBody, "投稿内容、メモ、タグを更新しました。"));
@@ -213,6 +218,30 @@ async function saveOrUpdate(type, payload, button, progressLabel, successTitle, 
   return result.body || {};
 }
 
+async function ensureQuotedPostSaved(quotedPayload) {
+  const tweetId = quotedPayload?.tweet_id;
+  if (!tweetId) {
+    return;
+  }
+
+  try {
+    const status = await loadPostStatus(tweetId, true);
+    if (status?.exists) {
+      return;
+    }
+  } catch {
+  }
+
+  const result = await chrome.runtime.sendMessage({ type: "SAVE_POST", payload: quotedPayload });
+  if (result?.ok || result?.body?.error_code === "POST_ALREADY_EXISTS") {
+    postStatusCache.set(tweetId, { exists: true, post: { ...quotedPayload } });
+    return;
+  }
+
+  await showResultDialog("引用元の保存に失敗しました", buildErrorDetail(result, quotedPayload), true);
+  throw new Error("QUOTED_POST_SAVE_FAILED");
+}
+
 function buildBackgroundVideoSuccessText(responseBody, baseText) {
   const backgroundCount = Number(responseBody?.background_video_count || 0);
   if (backgroundCount <= 0) {
@@ -253,8 +282,11 @@ async function extractPostData(article) {
   const handleEl = article.querySelector(`a[href*="/status/${tweetId}"]`) || article.querySelector("a[href*='/status/']");
   const handle = resolveHandle(handleEl?.getAttribute("href"));
   const authorName = article.querySelector("div[dir='ltr'] span")?.textContent?.trim() || handle;
-  const imageUrls = [...article.querySelectorAll("img")].map((img) => img.getAttribute("src") || "").filter((src) => src.includes("twimg.com/media")).map((urlValue) => ({ url: urlValue })).slice(0, 10);
-  const videoContext = collectVideoContext(article);
+  const quotedInfo = extractQuotedPostData(article, tweetId);
+  const quotedContainer = quotedInfo?.container || null;
+  const imageUrls = extractImageInputs(article, quotedContainer);
+  const videoContext = collectVideoContext(article, quotedContainer);
+  const quotedPost = quotedInfo?.post || null;
   return {
     tweet_id: tweetId,
     url,
@@ -264,14 +296,116 @@ async function extractPostData(article) {
     tags: [],
     note: "",
     images: imageUrls,
-    video_context: videoContext
+    video_context: videoContext,
+    quoted_post: quotedPost,
+    quoted_tweet_id: quotedPost?.tweet_id || null
   };
 }
 
-function collectVideoContext(article) {
+function extractQuotedPostData(article, rootTweetId) {
+  const statusLinks = [...article.querySelectorAll("a[href*='/status/']")];
+  const quotedLink = statusLinks.find((link) => {
+    const href = link.getAttribute("href") || "";
+    const match = href.match(/status\/(\d+)/);
+    return match && match[1] !== rootTweetId;
+  });
+  if (!quotedLink) {
+    return null;
+  }
+
+  const href = quotedLink.getAttribute("href") || "";
+  const match = href.match(/status\/(\d+)/);
+  const quotedTweetId = match ? match[1] : "";
+  if (!quotedTweetId) {
+    return null;
+  }
+
+  const textBlocks = [...article.querySelectorAll("div[data-testid='tweetText']")];
+  const quotedTextElement = textBlocks.length > 1 ? textBlocks[textBlocks.length - 1] : null;
+  const quotedText = quotedTextElement?.innerText?.trim() || "";
+  const timeElements = [...article.querySelectorAll("time")];
+  const quotedTimeElement = timeElements.length > 1 ? timeElements[timeElements.length - 1] : null;
+  const quotedTime = quotedTimeElement?.getAttribute("datetime") || "";
+  const nameSpans = [...article.querySelectorAll("div[dir='ltr'] span")].map((node) => node.textContent?.trim()).filter(Boolean);
+  const quotedAuthorName = nameSpans.length > 1 ? nameSpans[nameSpans.length - 1] : resolveHandle(href);
+  const quotedContainer = findQuotedContainer(article, quotedLink, quotedTextElement, quotedTimeElement);
+
+  return {
+    container: quotedContainer,
+    post: {
+      tweet_id: quotedTweetId,
+      url: new URL(href, location.origin).toString(),
+      author: {
+        handle: resolveHandle(href),
+        name: quotedAuthorName || resolveHandle(href)
+      },
+      created_at: quotedTime || new Date().toISOString(),
+      text: quotedText,
+      tags: [],
+      note: "",
+      images: extractImageInputs(quotedContainer),
+      video_context: collectVideoContext(quotedContainer),
+      quoted_tweet_id: null
+    }
+  };
+}
+
+function extractImageInputs(scope, excludeScope = null) {
+  return [...scope.querySelectorAll("img")]
+    .filter((img) => !excludeScope || !excludeScope.contains(img))
+    .map((img) => img.getAttribute("src") || "")
+    .filter((src) => src.includes("twimg.com/media"))
+    .map((urlValue) => ({ url: urlValue }))
+    .slice(0, 10);
+}
+
+function findQuotedContainer(article, quotedLink, quotedTextElement, quotedTimeElement) {
+  const anchorNodes = [quotedLink, quotedTextElement, quotedTimeElement].filter(Boolean);
+  let container = anchorNodes[0] || quotedLink;
+
+  for (let i = 1; i < anchorNodes.length; i += 1) {
+    container = findLowestCommonAncestor(container, anchorNodes[i], article) || container;
+  }
+
+  let current = container;
+  while (current && current !== article) {
+    if (
+      current.querySelector("div[data-testid='tweetText']") ||
+      current.querySelector("img[src*='twimg.com/media']") ||
+      current.querySelector("video") ||
+      current.querySelector("[data-testid='videoPlayer']")
+    ) {
+      return current;
+    }
+    current = current.parentElement;
+  }
+
+  return container || article;
+}
+
+function findLowestCommonAncestor(a, b, stopNode) {
+  const ancestors = new Set();
+  let current = a;
+  while (current) {
+    ancestors.add(current);
+    if (current === stopNode) break;
+    current = current.parentElement;
+  }
+
+  current = b;
+  while (current) {
+    if (ancestors.has(current)) return current;
+    if (current === stopNode) break;
+    current = current.parentElement;
+  }
+
+  return null;
+}
+
+function collectVideoContext(article, excludeScope = null) {
   const candidateUrls = [];
   const seen = new Set();
-  const videos = [...article.querySelectorAll("video")];
+  const videos = [...article.querySelectorAll("video")].filter((video) => !excludeScope || !excludeScope.contains(video));
 
   const pushCandidate = (value) => {
     const url = String(value || "").trim();
@@ -290,9 +424,8 @@ function collectVideoContext(article) {
 
   const hasVideo =
     videos.length > 0 ||
-    !!article.querySelector("[data-testid='videoPlayer']") ||
-    !!article.querySelector("div[aria-label*='動画']") ||
-    !!article.querySelector("div[aria-label*='Video']");
+    [...article.querySelectorAll("[data-testid='videoPlayer'], div[aria-label*='動画'], div[aria-label*='Video']")]
+      .some((node) => !excludeScope || !excludeScope.contains(node));
 
   return {
     has_video: hasVideo,

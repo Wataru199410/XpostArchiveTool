@@ -52,7 +52,10 @@ internal static class DesktopArchiveStore
                         MediaFiles = mediaFiles,
                         Note = post.Note ?? string.Empty,
                         VideoStatusText = videoStatus,
-                        HasActiveVideoDownload = mediaFiles.Any(x => x.Type == "video" && (x.DownloadStatus == "pending" || x.DownloadStatus == "downloading"))
+                        HasActiveVideoDownload = mediaFiles.Any(x => x.Type == "video" && (x.DownloadStatus == "pending" || x.DownloadStatus == "downloading")),
+                        QuotedTweetId = post.QuotedTweetId,
+                        QuotedAuthor = post.QuotedAuthor,
+                        QuotedText = post.QuotedText ?? string.Empty
                     };
                 })
                 .OrderByDescending(x => x.SavedAtSortValue)
@@ -188,9 +191,12 @@ ON CONFLICT(post_id, tag_id) DO NOTHING;";
     {
         using var cmd = conn.CreateCommand();
         cmd.CommandText = @"
-SELECT p.id, p.tweet_id, p.created_at, p.saved_at, p.dir_path, p.text, p.note, a.handle, a.name
+SELECT p.id, p.tweet_id, p.created_at, p.saved_at, p.dir_path, p.text, p.note, a.handle, a.name,
+       qp.tweet_id, qa.handle, qa.name, qp.text
 FROM posts p
-JOIN authors a ON a.id = p.author_id;";
+JOIN authors a ON a.id = p.author_id
+LEFT JOIN posts qp ON qp.id = p.quoted_post_id
+LEFT JOIN authors qa ON qa.id = qp.author_id;";
 
         using var reader = cmd.ExecuteReader();
         var posts = new List<PostRow>();
@@ -216,7 +222,11 @@ JOIN authors a ON a.id = p.author_id;";
                 reader.IsDBNull(5) ? string.Empty : reader.GetString(5),
                 reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
                 reader.GetString(7),
-                reader.GetString(8)));
+                reader.GetString(8),
+                reader.IsDBNull(9) ? string.Empty : reader.GetString(9),
+                reader.IsDBNull(10) ? string.Empty : reader.GetString(10),
+                reader.IsDBNull(11) ? string.Empty : reader.GetString(11),
+                reader.IsDBNull(12) ? string.Empty : reader.GetString(12)));
         }
 
         return posts;
@@ -318,5 +328,16 @@ ORDER BY m.post_id, m.sort_order ASC;";
         string Text,
         string Note,
         string AuthorHandle,
-        string AuthorName);
+        string AuthorName,
+        string QuotedTweetId,
+        string QuotedAuthorHandle,
+        string QuotedAuthorName,
+        string QuotedText)
+    {
+        public string QuotedAuthor => string.IsNullOrWhiteSpace(QuotedTweetId)
+            ? string.Empty
+            : string.IsNullOrWhiteSpace(QuotedAuthorName)
+                ? QuotedAuthorHandle
+                : $"{QuotedAuthorName} ({QuotedAuthorHandle})";
+    }
 }
