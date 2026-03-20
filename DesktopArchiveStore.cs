@@ -187,6 +187,66 @@ ON CONFLICT(post_id, tag_id) DO NOTHING;";
         }
     }
 
+    public static bool DeletePost(string dirPath, out string errorMessage)
+    {
+        errorMessage = string.Empty;
+
+        var dbPath = TagCatalogStore.ResolveDatabasePath();
+        if (!File.Exists(dbPath))
+        {
+            errorMessage = "archive.db が見つかりません。";
+            return false;
+        }
+
+        try
+        {
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            using var tx = conn.BeginTransaction();
+
+            long? postId = null;
+            using (var select = conn.CreateCommand())
+            {
+                select.Transaction = tx;
+                select.CommandText = "SELECT id FROM posts WHERE dir_path = $dir_path LIMIT 1";
+                select.Parameters.AddWithValue("$dir_path", dirPath);
+                var value = select.ExecuteScalar();
+                if (value is long id)
+                {
+                    postId = id;
+                }
+            }
+
+            if (postId is null)
+            {
+                errorMessage = "削除対象の投稿が見つかりません。";
+                return false;
+            }
+
+            using (var delete = conn.CreateCommand())
+            {
+                delete.Transaction = tx;
+                delete.CommandText = "DELETE FROM posts WHERE id = $id";
+                delete.Parameters.AddWithValue("$id", postId.Value);
+                delete.ExecuteNonQuery();
+            }
+
+            tx.Commit();
+
+            if (Directory.Exists(dirPath))
+            {
+                Directory.Delete(dirPath, true);
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+            return false;
+        }
+    }
+
     private static List<PostRow> LoadPostRows(SqliteConnection conn)
     {
         using var cmd = conn.CreateCommand();

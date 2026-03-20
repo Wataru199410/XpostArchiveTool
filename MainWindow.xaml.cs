@@ -505,6 +505,66 @@ public partial class MainWindow : Window
         Process.Start(new ProcessStartInfo { FileName = _selectedItem.DirPath, UseShellExecute = true });
     }
 
+    private void DeletePost_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedItem is null)
+        {
+            return;
+        }
+
+        var target = _selectedItem;
+        var deleteQuoted = false;
+
+        if (target.HasQuotedPost)
+        {
+            var choice = MessageBox.Show(
+                "この投稿には引用元があります。\n\nはい: 引用元も含めて削除\nいいえ: この投稿だけ削除\nキャンセル: 中止",
+                "投稿を削除",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Warning);
+
+            if (choice == MessageBoxResult.Cancel)
+            {
+                return;
+            }
+
+            deleteQuoted = choice == MessageBoxResult.Yes;
+        }
+        else
+        {
+            var confirm = MessageBox.Show(
+                "この投稿を削除しますか？",
+                "投稿を削除",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            if (confirm != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+
+        if (deleteQuoted && target.HasQuotedPost)
+        {
+            var quotedItem = _allItems.FirstOrDefault(x => string.Equals(x.TweetId, target.QuotedTweetId, StringComparison.Ordinal));
+            if (quotedItem is not null && !DesktopArchiveStore.DeletePost(quotedItem.DirPath, out var quotedError))
+            {
+                MessageBox.Show(quotedError, "引用元の削除に失敗しました", MessageBoxButton.OK, MessageBoxImage.Error);
+                return;
+            }
+        }
+
+        if (!DesktopArchiveStore.DeletePost(target.DirPath, out var errorMessage))
+        {
+            MessageBox.Show(errorMessage, "投稿の削除に失敗しました", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        LoadSavedPosts();
+        PostsCardList.SelectedItem = null;
+        ShowHomeState("左の一覧から投稿を選択してください。");
+    }
+
     private void OpenSelectedMedia()
     {
         if (DetailMediaList.SelectedItem is not MediaFileItem media)

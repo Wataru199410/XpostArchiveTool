@@ -340,6 +340,7 @@
                                        TextWrapping="Wrap"
                                        Text="左の一覧から投稿を選択してください。" Style="{StaticResource SelectableTextDisplay}"/>
                             <Button x:Name="OpenQuotedPostButton" Margin="0,8,0,0" Width="160" HorizontalAlignment="Left" Visibility="Collapsed" Content="引用元の投稿を開く" Click="OpenQuotedPost_Click"/>
+                            <Button Content="投稿を削除" Width="120" Margin="10,0,0,0" Padding="10,6" Background="#DC2626" Foreground="White" BorderThickness="0" Click="DeletePost_Click"/>
                         </StackPanel>
 
                         <Border Margin="0,12,0,0" Background="{StaticResource MutedSurface}" BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="12" Padding="12">
