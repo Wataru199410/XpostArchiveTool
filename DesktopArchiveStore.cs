@@ -22,7 +22,7 @@ internal static class DesktopArchiveStore
             var tagsByPostId = LoadTagsByPostId(conn);
             var mediaByPostId = LoadMediaByPostId(conn);
 
-            return posts
+            var items = posts
                 .Select(post =>
                 {
                     tagsByPostId.TryGetValue(post.Id, out var tagList);
@@ -60,6 +60,52 @@ internal static class DesktopArchiveStore
                 })
                 .OrderByDescending(x => x.SavedAtSortValue)
                 .ThenByDescending(x => x.TweetId)
+                .ToList();
+
+            var referencedByMap = items
+                .Where(x => !string.IsNullOrWhiteSpace(x.QuotedTweetId))
+                .GroupBy(x => x.QuotedTweetId, StringComparer.Ordinal)
+                .ToDictionary(
+                    g => g.Key,
+                    g => g
+                        .OrderByDescending(x => x.SavedAtSortValue)
+                        .ThenByDescending(x => x.TweetId)
+                        .ToList(),
+                    StringComparer.Ordinal);
+
+            return items
+                .Select(item =>
+                {
+                    if (!referencedByMap.TryGetValue(item.TweetId, out var referencingPosts) || referencingPosts.Count == 0)
+                    {
+                        return item;
+                    }
+
+                    return new PostListItem
+                    {
+                        SavedAt = item.SavedAt,
+                        SavedAtSortValue = item.SavedAtSortValue,
+                        CreatedAtSortValue = item.CreatedAtSortValue,
+                        Author = item.Author,
+                        Text = item.Text,
+                        Tags = item.Tags,
+                        TagList = item.TagList,
+                        TweetId = item.TweetId,
+                        DirPath = item.DirPath,
+                        ImageCount = item.ImageCount,
+                        VideoCount = item.VideoCount,
+                        ThumbnailPath = item.ThumbnailPath,
+                        MediaFiles = item.MediaFiles,
+                        Note = item.Note,
+                        VideoStatusText = item.VideoStatusText,
+                        HasActiveVideoDownload = item.HasActiveVideoDownload,
+                        QuotedTweetId = item.QuotedTweetId,
+                        QuotedAuthor = item.QuotedAuthor,
+                        QuotedText = item.QuotedText,
+                        ReferencedByTweetId = referencingPosts[0].TweetId,
+                        ReferencedByCount = referencingPosts.Count
+                    };
+                })
                 .ToList();
         }
         catch
@@ -187,7 +233,7 @@ ON CONFLICT(post_id, tag_id) DO NOTHING;";
         }
     }
 
-    public static bool DeletePost(string dirPath, out string errorMessage)
+    public static bool DeletePostsByTweetIds(IEnumerable<string> tweetIds, out string errorMessage)
     {
         errorMessage = string.Empty;
 
@@ -202,40 +248,60 @@ ON CONFLICT(post_id, tag_id) DO NOTHING;";
         {
             using var conn = new SqliteConnection($"Data Source={dbPath}");
             conn.Open();
-            using var tx = conn.BeginTransaction();
-
-            long? postId = null;
-            using (var select = conn.CreateCommand())
+            using (var pragma = conn.CreateCommand())
             {
-                select.Transaction = tx;
-                select.CommandText = "SELECT id FROM posts WHERE dir_path = $dir_path LIMIT 1";
-                select.Parameters.AddWithValue("$dir_path", dirPath);
-                var value = select.ExecuteScalar();
-                if (value is long id)
-                {
-                    postId = id;
-                }
+                pragma.CommandText = "PRAGMA foreign_keys = ON;";
+                pragma.ExecuteNonQuery();
             }
 
-            if (postId is null)
+            using var tx = conn.BeginTransaction();
+            var deleteTargets = tweetIds
+                .Where(static x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (deleteTargets.Count == 0)
             {
                 errorMessage = "削除対象の投稿が見つかりません。";
                 return false;
             }
 
-            using (var delete = conn.CreateCommand())
+            var postIds = new List<long>(deleteTargets.Count);
+            var dirPaths = new List<string>(deleteTargets.Count);
+            foreach (var tweetId in deleteTargets)
             {
+                using var select = conn.CreateCommand();
+                select.Transaction = tx;
+                select.CommandText = "SELECT id, dir_path FROM posts WHERE tweet_id = $tweet_id LIMIT 1";
+                select.Parameters.AddWithValue("$tweet_id", tweetId);
+                using var reader = select.ExecuteReader();
+                if (!reader.Read())
+                {
+                    errorMessage = "削除対象の投稿が見つかりません。";
+                    return false;
+                }
+
+                postIds.Add(reader.GetInt64(0));
+                dirPaths.Add(reader.GetString(1));
+            }
+
+            foreach (var postId in postIds)
+            {
+                using var delete = conn.CreateCommand();
                 delete.Transaction = tx;
                 delete.CommandText = "DELETE FROM posts WHERE id = $id";
-                delete.Parameters.AddWithValue("$id", postId.Value);
+                delete.Parameters.AddWithValue("$id", postId);
                 delete.ExecuteNonQuery();
             }
 
             tx.Commit();
 
-            if (Directory.Exists(dirPath))
+            foreach (var dirPath in dirPaths.Distinct(StringComparer.Ordinal))
             {
-                Directory.Delete(dirPath, true);
+                if (Directory.Exists(dirPath))
+                {
+                    Directory.Delete(dirPath, true);
+                }
             }
 
             return true;

@@ -1,10 +1,13 @@
 using System.Diagnostics;
 using System.IO;
 using System.ComponentModel;
+using System.Globalization;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Data;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Imaging;
 
 namespace XPostArchive.Desktop;
 
@@ -52,8 +55,8 @@ public partial class MainWindow : Window
         }
 
         var message = activeDownloads == 1
-            ? "動画を1件保存中です。アプリを終了すると中断されます。終了しますか？"
-            : $"動画を{activeDownloads}件保存中です。アプリを終了すると中断されます。終了しますか？";
+            ? "動画をバックグラウンドで保存中です。アプリを終了すると中断されます。終了しますか？"
+            : $"動画を{activeDownloads}件バックグラウンドで保存中です。アプリを終了すると中断されます。終了しますか？";
         var result = MessageBox.Show(message, "動画保存中", MessageBoxButton.YesNo, MessageBoxImage.Warning);
         if (result != MessageBoxResult.Yes)
         {
@@ -180,6 +183,26 @@ public partial class MainWindow : Window
         }
 
         OpenQuotedPost(item);
+    }
+
+    private void CardOpenReferencingPost_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not PostListItem item)
+        {
+            return;
+        }
+
+        OpenReferencingPost(item);
+    }
+
+    private void CardDeletePost_Click(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.DataContext is not PostListItem item)
+        {
+            return;
+        }
+
+        DeletePost(item);
     }
 
     private void ManageTags_Click(object sender, RoutedEventArgs e)
@@ -358,6 +381,7 @@ public partial class MainWindow : Window
         DetailSubTitleText.Text = subTitle ?? "左の一覧から投稿を選択してください。";
         DetailTweetText.Text = "投稿本文がここに表示されます。";
         OpenQuotedPostButton.Visibility = Visibility.Collapsed;
+        OpenReferencingPostButton.Visibility = Visibility.Collapsed;
         DetailTagText.Text = "タグ: なし";
         DetailMediaList.ItemsSource = new[]
         {
@@ -385,6 +409,8 @@ public partial class MainWindow : Window
         DetailSubTitleText.Text = $"Tweet ID: {item.TweetId} | 保存日時: {item.SavedAt}";
         DetailTweetText.Text = string.IsNullOrWhiteSpace(item.Text) ? "(本文なし)" : item.Text;
         OpenQuotedPostButton.Visibility = string.IsNullOrWhiteSpace(item.QuotedTweetId) ? Visibility.Collapsed : Visibility.Visible;
+        OpenReferencingPostButton.Visibility = string.IsNullOrWhiteSpace(item.ReferencedByTweetId) ? Visibility.Collapsed : Visibility.Visible;
+        OpenReferencingPostButton.Content = item.ReferencedByCount > 1 ? $"引用先の投稿を開く ({item.ReferencedByCount})" : "引用先の投稿を開く";
         OpenQuotedPostButton.Content = "引用元の投稿を開く";
 
         _editableTags.Clear();
@@ -423,6 +449,16 @@ public partial class MainWindow : Window
         OpenQuotedPost(_selectedItem);
     }
 
+    private void OpenReferencingPost_Click(object sender, RoutedEventArgs e)
+    {
+        if (_selectedItem is null)
+        {
+            return;
+        }
+
+        OpenReferencingPost(_selectedItem);
+    }
+
     private void OpenQuotedPost(PostListItem item)
     {
         if (string.IsNullOrWhiteSpace(item.QuotedTweetId))
@@ -433,13 +469,32 @@ public partial class MainWindow : Window
         var quotedItem = _allItems.FirstOrDefault(x => string.Equals(x.TweetId, item.QuotedTweetId, StringComparison.Ordinal));
         if (quotedItem is null)
         {
-            MessageBox.Show("引用元の投稿が一覧に見つかりません。", "投稿が見つかりません", MessageBoxButton.OK, MessageBoxImage.Information);
+            MessageBox.Show("引用元の投稿は一覧に見つかりません。", "引用元が見つかりません", MessageBoxButton.OK, MessageBoxImage.Information);
             return;
         }
 
         PostsCardList.SelectedItem = quotedItem;
         PostsCardList.ScrollIntoView(quotedItem);
         ShowPostDetail(quotedItem);
+    }
+
+    private void OpenReferencingPost(PostListItem item)
+    {
+        if (string.IsNullOrWhiteSpace(item.ReferencedByTweetId))
+        {
+            return;
+        }
+
+        var referencingItem = _allItems.FirstOrDefault(x => string.Equals(x.TweetId, item.ReferencedByTweetId, StringComparison.Ordinal));
+        if (referencingItem is null)
+        {
+            MessageBox.Show("引用先の投稿は一覧に見つかりません。", "引用先が見つかりません", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        PostsCardList.SelectedItem = referencingItem;
+        PostsCardList.ScrollIntoView(referencingItem);
+        ShowPostDetail(referencingItem);
     }
 
     private TagEditSaveResult ApplyTagsFromEditor(IReadOnlyList<string> tags)
@@ -512,7 +567,11 @@ public partial class MainWindow : Window
             return;
         }
 
-        var target = _selectedItem;
+        DeletePost(_selectedItem);
+    }
+
+    private void DeletePost(PostListItem target)
+    {
         var deleteQuoted = false;
 
         if (target.HasQuotedPost)
@@ -544,17 +603,13 @@ public partial class MainWindow : Window
             }
         }
 
+        var deleteTweetIds = new List<string> { target.TweetId };
         if (deleteQuoted && target.HasQuotedPost)
         {
-            var quotedItem = _allItems.FirstOrDefault(x => string.Equals(x.TweetId, target.QuotedTweetId, StringComparison.Ordinal));
-            if (quotedItem is not null && !DesktopArchiveStore.DeletePost(quotedItem.DirPath, out var quotedError))
-            {
-                MessageBox.Show(quotedError, "引用元の削除に失敗しました", MessageBoxButton.OK, MessageBoxImage.Error);
-                return;
-            }
+            deleteTweetIds.Add(target.QuotedTweetId);
         }
 
-        if (!DesktopArchiveStore.DeletePost(target.DirPath, out var errorMessage))
+        if (!DesktopArchiveStore.DeletePostsByTweetIds(deleteTweetIds, out var errorMessage))
         {
             MessageBox.Show(errorMessage, "投稿の削除に失敗しました", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
@@ -721,7 +776,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        TagSummaryText.Text = $"タグ: {string.Join("・", _selectedTags.OrderBy(x => x, StringComparer.CurrentCulture))} をすべて含む";
+        TagSummaryText.Text = $"タグ: {string.Join("・", _selectedTags.OrderBy(x => x, StringComparer.CurrentCulture))} を含む";
     }
 }
 
@@ -747,6 +802,9 @@ public sealed class PostListItem
     public string QuotedAuthor { get; init; } = string.Empty;
     public string QuotedText { get; init; } = string.Empty;
     public bool HasQuotedPost => !string.IsNullOrWhiteSpace(QuotedTweetId);
+    public string ReferencedByTweetId { get; init; } = string.Empty;
+    public int ReferencedByCount { get; init; }
+    public bool HasReferencingPost => !string.IsNullOrWhiteSpace(ReferencedByTweetId);
 }
 
 public sealed class TagFilterItem
@@ -772,6 +830,34 @@ public sealed class MediaFileItem
         "failed" => string.IsNullOrWhiteSpace(DownloadError) ? "動画保存に失敗しました" : $"動画保存に失敗しました: {DownloadError}",
         _ => "動画保存済み"
     };
+}
+
+public sealed class FileImageSourceConverter : IValueConverter
+{
+    public object? Convert(object? value, Type targetType, object? parameter, CultureInfo culture)
+    {
+        if (value is not string path || string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            var bitmap = new BitmapImage();
+            bitmap.BeginInit();
+            bitmap.CacheOption = BitmapCacheOption.OnLoad;
+            bitmap.UriSource = new Uri(path, UriKind.Absolute);
+            bitmap.EndInit();
+            bitmap.Freeze();
+            return bitmap;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public object? ConvertBack(object? value, Type targetType, object? parameter, CultureInfo culture) => Binding.DoNothing;
 }
 
 public sealed class EditableTagItem
