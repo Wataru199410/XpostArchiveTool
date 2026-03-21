@@ -593,6 +593,13 @@ public partial class MainWindow : Window
     private void DeletePost(PostListItem target)
     {
         var deleteQuoted = false;
+        var deleteReferencing = false;
+        var referencingTweetIds = _allItems
+            .Where(x => string.Equals(x.QuotedTweetId, target.TweetId, StringComparison.Ordinal))
+            .Select(x => x.TweetId)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
 
         if (target.HasQuotedPost)
         {
@@ -623,10 +630,33 @@ public partial class MainWindow : Window
             }
         }
 
+        if (referencingTweetIds.Count > 0)
+        {
+            var referencingMessage = referencingTweetIds.Count == 1
+                ? "この投稿を引用している引用先の投稿が1件あります。\n\nはい: 引用先も含めて削除\nいいえ: この投稿だけ削除\nキャンセル: 中止"
+                : $"この投稿を引用している引用先の投稿が{referencingTweetIds.Count}件あります。\n\nはい: 引用先も含めて削除\nいいえ: この投稿だけ削除\nキャンセル: 中止";
+            var choice = MessageBox.Show(
+                referencingMessage,
+                "投稿を削除",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Warning);
+
+            if (choice == MessageBoxResult.Cancel)
+            {
+                return;
+            }
+
+            deleteReferencing = choice == MessageBoxResult.Yes;
+        }
+
         var deleteTweetIds = new List<string> { target.TweetId };
         if (deleteQuoted && target.HasQuotedPost)
         {
             deleteTweetIds.Add(target.QuotedTweetId);
+        }
+        if (deleteReferencing)
+        {
+            deleteTweetIds.AddRange(referencingTweetIds);
         }
 
         if (!DesktopArchiveStore.DeletePostsByTweetIds(deleteTweetIds, out var errorMessage))

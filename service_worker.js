@@ -341,12 +341,17 @@ function selectVideoPlaylistsForTweet(tabId, tweetUrl, tweetIdFromPayload, video
   const now = Date.now();
   const seen = new Set();
   const output = [];
+  const hasVideo = videoContext?.has_video === true;
 
   for (const candidateUrl of normalizeDirectVideoCandidates(videoContext)) {
     if (seen.has(candidateUrl)) continue;
     seen.add(candidateUrl);
     output.push({ m3u8_url: candidateUrl });
     if (output.length >= MAX_VIDEO_PLAYLISTS_PER_SAVE) return output;
+  }
+
+  if (!hasVideo) {
+    return output;
   }
 
   const items = m3u8ByTab.get(tabId) ?? [];
@@ -366,12 +371,10 @@ function selectVideoPlaylistsForTweet(tabId, tweetUrl, tweetIdFromPayload, video
     (item.m3u8_url || "").includes(tweetId)
   );
 
-  const candidates = filtered.length > 0
-    ? filtered
-    : recentItems
-        .slice()
-        .sort((a, b) => (b.captured_at || 0) - (a.captured_at || 0))
-        .slice(0, MAX_VIDEO_PLAYLISTS_PER_SAVE);
+  const candidates = filtered
+    .slice()
+    .sort((a, b) => (b.captured_at || 0) - (a.captured_at || 0))
+    .slice(0, MAX_VIDEO_PLAYLISTS_PER_SAVE);
 
   for (const item of candidates) {
     if (seen.has(item.m3u8_url)) continue;
