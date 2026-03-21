@@ -212,7 +212,7 @@
                                         <ColumnDefinition Width="Auto"/>
                                     </Grid.ColumnDefinitions>
 
-                                    <TextBlock Text="&#x30BF;&#x30B0;&#x4E00;&#x89A7;" FontSize="24" FontWeight="Bold" Foreground="{StaticResource TextMain}" VerticalAlignment="Center"/>
+                                    <TextBlock Text="&#x6295;&#x7A3F;&#x4E00;&#x89A7;" FontSize="24" FontWeight="Bold" Foreground="{StaticResource TextMain}" VerticalAlignment="Center"/>
                                     <Button Grid.Column="1"
                                             Content="&#xE72C;"
                                             Margin="12,0,0,0"
@@ -302,7 +302,7 @@
                              SelectionChanged="PostsCardList_SelectionChanged">
                         <ListBox.ItemTemplate>
                             <DataTemplate>
-                                <Border BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,10" Background="White">
+                                <Border BorderBrush="{StaticResource Border}" BorderThickness="1" CornerRadius="10" Padding="10" Margin="0,0,0,10" Background="White" PreviewMouseLeftButtonDown="PostCard_PreviewMouseLeftButtonDown">
                                     <Grid>
                                         <Grid.ColumnDefinitions>
                                             <ColumnDefinition Width="120"/>
@@ -320,8 +320,7 @@
                                             <TextBox Text="{Binding Tags, Mode=OneWay}" Margin="0,8,0,0" Foreground="{StaticResource TextSub}" FontSize="12" Style="{StaticResource SelectableTextDisplay}"/>
                                             <StackPanel Margin="0,8,0,0" HorizontalAlignment="Left">
                                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
-                                                    <Button Content="&#x6295;&#x7A3F;&#x8A73;&#x7D30;&#x3092;&#x958B;&#x304F;" Width="110" HorizontalAlignment="Left" Click="CardOpenDetail_Click"/>
-                                                    <Button Content="&#x524A;&#x9664;" Width="64" Margin="8,0,0,0" HorizontalAlignment="Left" Background="#DC2626" Foreground="White" BorderThickness="0" Click="CardDeletePost_Click"/>
+                                                    <Button Content="&#x524A;&#x9664;" Width="64" HorizontalAlignment="Left" Background="#DC2626" Foreground="White" BorderThickness="0" Click="CardDeletePost_Click"/>
                                                 </StackPanel>
                                                 <StackPanel Orientation="Horizontal" Margin="0,8,0,0" HorizontalAlignment="Left">
                                                     <Button Content="&#x5F15;&#x7528;&#x5143;&#x3078;" Width="84" HorizontalAlignment="Left" Click="CardOpenQuotedPost_Click" IsEnabled="{Binding HasQuotedPost}"/>

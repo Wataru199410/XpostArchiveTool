@@ -164,8 +164,13 @@ public partial class MainWindow : Window
         ShowPostDetail(item);
     }
 
-    private void CardOpenDetail_Click(object sender, RoutedEventArgs e)
+    private void PostCard_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
+        if (e.OriginalSource is DependencyObject source && FindAncestor<Button>(source) is not null)
+        {
+            return;
+        }
+
         if ((sender as FrameworkElement)?.DataContext is not PostListItem item)
         {
             return;
@@ -203,6 +208,21 @@ public partial class MainWindow : Window
         }
 
         DeletePost(item);
+    }
+
+    private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
+    {
+        while (current is not null)
+        {
+            if (current is T typed)
+            {
+                return typed;
+            }
+
+            current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
     }
 
     private void ManageTags_Click(object sender, RoutedEventArgs e)
