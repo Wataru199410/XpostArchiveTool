@@ -8,6 +8,7 @@ const m3u8ByTab = new Map();
 const MAX_M3U8_PER_TAB = 80;
 const MAX_VIDEO_PLAYLISTS_PER_SAVE = 5;
 const M3U8_MAX_AGE_MS = 10 * 60 * 1000;
+const VIDEO_FALLBACK_WINDOW_MS = 60 * 1000;
 let activeApiBase = API_BASE_CANDIDATES[0];
 
 chrome.webRequest.onBeforeRequest.addListener(
@@ -347,7 +348,7 @@ function selectVideoPlaylistsForTweet(tabId, tweetUrl, tweetIdFromPayload, video
     if (seen.has(candidateUrl)) continue;
     seen.add(candidateUrl);
     output.push({ m3u8_url: candidateUrl });
-    if (output.length >= MAX_VIDEO_PLAYLISTS_PER_SAVE) return output;
+    return output;
   }
 
   if (!hasVideo) {
@@ -371,7 +372,9 @@ function selectVideoPlaylistsForTweet(tabId, tweetUrl, tweetIdFromPayload, video
     (item.m3u8_url || "").includes(tweetId)
   );
 
-  const candidates = filtered
+  const candidates = (filtered.length > 0
+    ? filtered
+    : recentItems.filter((item) => now - (item.captured_at || 0) <= VIDEO_FALLBACK_WINDOW_MS))
     .slice()
     .sort((a, b) => (b.captured_at || 0) - (a.captured_at || 0))
     .slice(0, MAX_VIDEO_PLAYLISTS_PER_SAVE);
@@ -380,7 +383,7 @@ function selectVideoPlaylistsForTweet(tabId, tweetUrl, tweetIdFromPayload, video
     if (seen.has(item.m3u8_url)) continue;
     seen.add(item.m3u8_url);
     output.push({ m3u8_url: item.m3u8_url });
-    if (output.length >= MAX_VIDEO_PLAYLISTS_PER_SAVE) break;
+    break;
   }
   return output;
 }

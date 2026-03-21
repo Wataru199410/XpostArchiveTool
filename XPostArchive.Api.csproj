@@ -18,11 +18,14 @@
     <Compile Remove="TagCatalogStore.cs" />
     <Compile Remove="DesktopArchiveStore.cs" />
     <Compile Remove="LocalApiManager.cs" />
+    <Compile Remove="tools\**\*.cs" />
+    <Compile Remove="tools\**\obj\**\*.cs" />
     <None Remove="App.xaml" />
     <None Remove="MainWindow.xaml" />
     <None Remove="PostDetailWindow.xaml" />
     <None Remove="TagEditWindow.xaml" />
     <None Remove="TagManagementWindow.xaml" />
+    <None Remove="tools\**" />
   </ItemGroup>
 
   <ItemGroup>

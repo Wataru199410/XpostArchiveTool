@@ -638,7 +638,7 @@ function buildErrorDetail(result, payload) {
 
 async function showResultDialog(title, detailText, isError) {
   closeExistingModal();
-  const { root, okButton, copyButton } = createDetailModal(title, detailText, isError, false);
+  const { root, okButton, copyButton } = createDetailModal(title, detailText, isError, false, extractPrimaryErrorMessage(detailText));
   copyButton.addEventListener("click", async () => copyText(detailText));
   await waitButton(okButton);
   root.remove();
@@ -646,7 +646,7 @@ async function showResultDialog(title, detailText, isError) {
 
 async function showConfirmDialog(title, message, detailText) {
   closeExistingModal();
-  const { root, body, okButton, cancelButton, copyButton } = createDetailModal(title, detailText, true, true);
+  const { root, body, okButton, cancelButton, copyButton } = createDetailModal(title, detailText, true, true, extractPrimaryErrorMessage(detailText));
   const messageNode = document.createElement("div");
   messageNode.textContent = message;
   messageNode.style.whiteSpace = "pre-wrap";
@@ -658,13 +658,13 @@ async function showConfirmDialog(title, message, detailText) {
   return clicked === "ok";
 }
 
-function createDetailModal(title, detailText, isError, withCancel) {
+function createDetailModal(title, detailText, isError, withCancel, headerMessage = "") {
   const root = document.createElement("div");
   root.id = MODAL_ID;
   root.className = "x-post-archive-modal-root";
   const panel = document.createElement("div");
   panel.className = "x-post-archive-detail-panel";
-  panel.innerHTML = `<div class="x-post-archive-detail-header"><h3 style="color:${isError ? "#b42318" : "#0f5132"}">${escapeHtml(title)}</h3></div><div class="x-post-archive-detail-body"><textarea readonly class="x-post-archive-detail-textarea"></textarea></div><div class="x-post-archive-detail-footer"></div>`;
+  panel.innerHTML = `<div class="x-post-archive-detail-header"><h3 style="color:${isError ? "#b42318" : "#0f5132"}">${escapeHtml(title)}</h3>${headerMessage ? `<div style="margin-top:8px;font-size:14px;line-height:1.5;font-weight:700;color:${isError ? "#b42318" : "#0f5132"}">${escapeHtml(headerMessage)}</div>` : ""}</div><div class="x-post-archive-detail-body"><textarea readonly class="x-post-archive-detail-textarea"></textarea></div><div class="x-post-archive-detail-footer"></div>`;
   panel.querySelector("textarea").value = detailText;
   const footer = panel.querySelector(".x-post-archive-detail-footer");
   const copyButton = createDetailButton("コピー", "#e4e7ec", "#111");
@@ -679,6 +679,21 @@ function createDetailModal(title, detailText, isError, withCancel) {
   textarea.focus();
   textarea.select();
   return { root, body: panel.querySelector(".x-post-archive-detail-body"), okButton, cancelButton, copyButton };
+}
+
+function extractPrimaryErrorMessage(detailText) {
+  const text = String(detailText || "");
+  const messageMatch = text.match(/"message"\s*:\s*"([^"]+)"/);
+  if (messageMatch?.[1]) {
+    return messageMatch[1];
+  }
+
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  return lines.find((line) => !/^status:|^ok:|^response\.body:|^request\.payload:/i.test(line)) || "";
 }
 
 function createDetailButton(label, background, color) {
