@@ -143,7 +143,7 @@ ON CONFLICT(name) DO NOTHING;";
             return Path.Combine(projectRoot, "XArchive");
         }
 
-        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "XArchive"));
+        return Path.Combine(GetLocalAppDataRoot(), "XArchive");
     }
 
     public static string ResolveDatabasePath()
@@ -154,7 +154,14 @@ ON CONFLICT(name) DO NOTHING;";
             return Path.Combine(projectRoot, "data", "archive.db");
         }
 
-        return Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "data", "archive.db"));
+        return Path.Combine(GetLocalAppDataRoot(), "data", "archive.db");
+    }
+
+    private static string GetLocalAppDataRoot()
+    {
+        return Path.GetFullPath(Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "XPostArchive"));
     }
 
     private static string? FindProjectRoot()

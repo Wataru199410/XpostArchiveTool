@@ -368,7 +368,18 @@ sealed record AppConfig(string Host, int Port, string StorageRootPath, string Da
         {
             ffmpegPath = ResolveRelativePath(ffmpegPath);
         }
-        return new AppConfig(config["Server:Host"] ?? "127.0.0.1", int.TryParse(config["Server:Port"], out var p) ? p : 18765, config["Storage:RootPath"] ?? "./XArchive", config["Database:Path"] ?? "./data/archive.db", config["Auth:TokenFilePath"] ?? "./data/auth_token.txt", ffmpegPath, int.TryParse(config["Video:RetryCount"], out var r) ? r : 2);
+        var storageRootPath = ResolveDataPath(config["Storage:RootPath"] ?? "./XArchive", "XArchive");
+        var databasePath = ResolveDataPath(config["Database:Path"] ?? "./data/archive.db", Path.Combine("data", "archive.db"));
+        var tokenFilePath = ResolveDataPath(config["Auth:TokenFilePath"] ?? "./data/auth_token.txt", Path.Combine("data", "auth_token.txt"));
+        return new AppConfig(
+            config["Server:Host"] ?? "127.0.0.1",
+            int.TryParse(config["Server:Port"], out var p) ? p : 18765,
+            storageRootPath,
+            databasePath,
+            tokenFilePath,
+            ffmpegPath,
+            int.TryParse(config["Video:RetryCount"], out var r) ? r : 2
+        );
     }
 
     private static string ResolveRelativePath(string relativePath)
@@ -382,6 +393,43 @@ sealed record AppConfig(string Host, int Port, string StorageRootPath, string Da
         };
 
         return candidates.FirstOrDefault(File.Exists) ?? candidates[0];
+    }
+
+    private static string ResolveDataPath(string configuredPath, string localAppDataRelativePath)
+    {
+        if (Path.IsPathRooted(configuredPath))
+        {
+            return Path.GetFullPath(configuredPath);
+        }
+
+        var projectRoot = FindProjectRoot();
+        if (projectRoot is not null)
+        {
+            return Path.GetFullPath(Path.Combine(projectRoot, configuredPath));
+        }
+
+        var appDataRoot = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "XPostArchive");
+        return Path.GetFullPath(Path.Combine(appDataRoot, localAppDataRelativePath));
+    }
+
+    private static string? FindProjectRoot()
+    {
+        var dir = new DirectoryInfo(AppContext.BaseDirectory);
+        while (dir is not null)
+        {
+            var desktopCsproj = Path.Combine(dir.FullName, "XPostArchive.Desktop.csproj");
+            var apiCsproj = Path.Combine(dir.FullName, "XPostArchive.Api.csproj");
+            if (File.Exists(desktopCsproj) || File.Exists(apiCsproj))
+            {
+                return dir.FullName;
+            }
+
+            dir = dir.Parent;
+        }
+
+        return null;
     }
 }
 
