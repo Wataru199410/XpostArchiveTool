@@ -40,8 +40,27 @@
             <Setter Property="Template">
                 <Setter.Value>
                     <ControlTemplate TargetType="Button">
-                        <Border Background="{TemplateBinding Background}" CornerRadius="10">
+                        <Border Background="{TemplateBinding Background}"
+                                CornerRadius="10"
+                                Padding="{TemplateBinding Padding}">
                             <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="PillPrimaryButton" TargetType="Button" BasedOn="{StaticResource PrimaryButton}">
+            <Setter Property="Height" Value="30"/>
+            <Setter Property="Padding" Value="24,0"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border Background="{TemplateBinding Background}"
+                                CornerRadius="15"
+                                Padding="{TemplateBinding Padding}">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"/>
                         </Border>
                     </ControlTemplate>
                 </Setter.Value>
@@ -90,7 +109,7 @@
 
         <Style x:Key="TagChip" TargetType="Border">
             <Setter Property="Background" Value="{StaticResource TagBg}"/>
-            <Setter Property="CornerRadius" Value="999"/>
+            <Setter Property="CornerRadius" Value="4"/>
             <Setter Property="Padding" Value="10,4"/>
             <Setter Property="Margin" Value="0,0,8,8"/>
         </Style>
@@ -437,8 +456,9 @@
 
                                 <StackPanel Orientation="Horizontal" Margin="0,12,0,0">
                                     <Button Content="&#x30E1;&#x30E2;&#x3092;&#x4FDD;&#x5B58;"
-                                            Width="92"
-                                            Style="{StaticResource PrimaryButton}"
+                                            MinWidth="120"
+                                            FontSize="15"
+                                            Style="{StaticResource PillPrimaryButton}"
                                             Click="SaveDetailEdits_Click"/>
                                     <TextBox x:Name="DetailSaveStatusText"
                                                Margin="12,0,0,0"

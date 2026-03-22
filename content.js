@@ -554,7 +554,7 @@ function extractQuotedPostData(article, rootTweetId, cachedRoot = null) {
 function extractImageInputs(scope, excludeScope = null) {
   return [...scope.querySelectorAll("img")]
     .filter((img) => !excludeScope || !excludeScope.contains(img))
-    .map((img) => img.getAttribute("src") || "")
+    .map((img) => normalizeImageUrl(img.getAttribute("src") || ""))
     .filter((src) => src.includes("twimg.com/media"))
     .map((urlValue) => ({ url: urlValue }))
     .slice(0, 10);
@@ -564,12 +564,31 @@ function dedupeImageInputs(items) {
   const output = [];
   const seen = new Set();
   for (const item of items || []) {
-    const url = String(item?.url || "").trim();
+    const url = normalizeImageUrl(item?.url || "");
     if (!url || seen.has(url)) continue;
     seen.add(url);
     output.push({ url });
   }
   return output.slice(0, 10);
+}
+
+function normalizeImageUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+
+  try {
+    const url = new URL(raw, location.origin);
+    if (url.hostname.endsWith("twimg.com") && url.pathname.includes("/media/")) {
+      const format = (url.searchParams.get("format") || "").trim();
+      if (format) {
+        return `${url.origin}${url.pathname}.${format.toLowerCase()}`;
+      }
+      return `${url.origin}${url.pathname}`;
+    }
+    return url.toString();
+  } catch {
+    return raw;
+  }
 }
 
 function dedupeStrings(values) {
