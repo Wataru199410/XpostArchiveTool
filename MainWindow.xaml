@@ -301,6 +301,7 @@
                              x:Name="PostsCardList"
                              Margin="0,12,0,0"
                              BorderThickness="0"
+                             PreviewMouseWheel="PostsCardList_PreviewMouseWheel"
                              SelectionChanged="PostsCardList_SelectionChanged">
                         <ListBox.ItemTemplate>
                             <DataTemplate>

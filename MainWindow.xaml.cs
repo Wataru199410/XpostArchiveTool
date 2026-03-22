@@ -180,6 +180,21 @@ public partial class MainWindow : Window
         ShowPostDetail(item);
     }
 
+    private void PostsCardList_PreviewMouseWheel(object sender, MouseWheelEventArgs e)
+    {
+        var scrollViewer = FindDescendant<ScrollViewer>(PostsCardList);
+        if (scrollViewer is null)
+        {
+            return;
+        }
+
+        var delta = -e.Delta / 120.0;
+        var nextOffset = scrollViewer.VerticalOffset + (delta * 1.0);
+        nextOffset = Math.Max(0, Math.Min(nextOffset, scrollViewer.ScrollableHeight));
+        scrollViewer.ScrollToVerticalOffset(nextOffset);
+        e.Handled = true;
+    }
+
     private void CardOpenQuotedPost_Click(object sender, RoutedEventArgs e)
     {
         if ((sender as FrameworkElement)?.DataContext is not PostListItem item)
@@ -220,6 +235,31 @@ public partial class MainWindow : Window
             }
 
             current = VisualTreeHelper.GetParent(current);
+        }
+
+        return null;
+    }
+
+    private static T? FindDescendant<T>(DependencyObject? current) where T : DependencyObject
+    {
+        if (current is null)
+        {
+            return null;
+        }
+
+        for (var i = 0; i < VisualTreeHelper.GetChildrenCount(current); i++)
+        {
+            var child = VisualTreeHelper.GetChild(current, i);
+            if (child is T typed)
+            {
+                return typed;
+            }
+
+            var nested = FindDescendant<T>(child);
+            if (nested is not null)
+            {
+                return nested;
+            }
         }
 
         return null;
