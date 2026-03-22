@@ -6,6 +6,7 @@ const MODAL_ID = "x-post-archive-modal";
 const TOAST_ID = "x-post-archive-toast";
 const TAG_LIMIT = 30;
 const TAG_MAX_COUNT = 10;
+const API_PAYLOAD_EVENT = "__x_post_archive_api_payload__";
 const tweetMediaCache = new Map();
 var extractTweetId = function(url) {
   const match = String(url || "").match(/status\/(\d+)/);
@@ -36,6 +37,19 @@ function boot() {
 function installApiResponseHooks() {
   if (window.__xPostArchiveApiHookInstalled) return;
   window.__xPostArchiveApiHookInstalled = true;
+
+  window.addEventListener(API_PAYLOAD_EVENT, (event) => {
+    try {
+      cacheTweetsFromPayload(event.detail);
+    } catch {
+    }
+  });
+
+  const script = document.createElement("script");
+  script.src = chrome.runtime.getURL("page_hook.js");
+  script.async = false;
+  script.onload = () => script.remove();
+  (document.head || document.documentElement).appendChild(script);
 
   const originalFetch = window.fetch;
   window.fetch = async (...args) => {
@@ -486,39 +500,43 @@ function hasUsableVideoCandidate(videoContext) {
 }
 
 function extractQuotedPostData(article, rootTweetId, cachedRoot = null) {
-  if (cachedRoot?.quoted_post?.tweet_id) {
-    return {
-      container: null,
-      post: buildQuotedPayloadFromCached(cachedRoot.quoted_post)
-    };
-  }
-
   const statusLinks = [...article.querySelectorAll("a[href*='/status/']")];
   const quotedLink = statusLinks.find((link) => {
     const href = link.getAttribute("href") || "";
     const match = href.match(/status\/(\d+)/);
     return match && match[1] !== rootTweetId;
   });
-  if (!quotedLink) {
+  const textBlocks = [...article.querySelectorAll("div[data-testid='tweetText']")];
+  const quotedTextElement = textBlocks.length > 1 ? textBlocks[textBlocks.length - 1] : null;
+  const timeElements = [...article.querySelectorAll("time")];
+  const quotedTimeElement = timeElements.length > 1 ? timeElements[timeElements.length - 1] : null;
+  const fallbackQuotedAnchor = quotedTextElement || quotedTimeElement || quotedLink || null;
+  const quotedContainer = fallbackQuotedAnchor
+    ? findQuotedContainer(article, fallbackQuotedAnchor, quotedTextElement, quotedTimeElement)
+    : null;
+
+  if (cachedRoot?.quoted_post?.tweet_id) {
+    return {
+      container: quotedContainer,
+      post: buildQuotedPayloadFromCached(cachedRoot.quoted_post)
+    };
+  }
+
+  if (!quotedLink && !quotedContainer) {
     return null;
   }
 
-  const href = quotedLink.getAttribute("href") || "";
+  const href = quotedLink?.getAttribute("href") || "";
   const match = href.match(/status\/(\d+)/);
   const quotedTweetId = match ? match[1] : "";
   if (!quotedTweetId) {
-    return null;
+    return quotedContainer ? { container: quotedContainer, post: null } : null;
   }
 
-  const textBlocks = [...article.querySelectorAll("div[data-testid='tweetText']")];
-  const quotedTextElement = textBlocks.length > 1 ? textBlocks[textBlocks.length - 1] : null;
   const quotedText = quotedTextElement?.innerText?.trim() || "";
-  const timeElements = [...article.querySelectorAll("time")];
-  const quotedTimeElement = timeElements.length > 1 ? timeElements[timeElements.length - 1] : null;
   const quotedTime = quotedTimeElement?.getAttribute("datetime") || "";
   const nameSpans = [...article.querySelectorAll("div[dir='ltr'] span")].map((node) => node.textContent?.trim()).filter(Boolean);
   const quotedAuthorName = nameSpans.length > 1 ? nameSpans[nameSpans.length - 1] : resolveHandle(href);
-  const quotedContainer = findQuotedContainer(article, quotedLink, quotedTextElement, quotedTimeElement);
 
   return {
     container: quotedContainer,
