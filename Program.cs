@@ -151,7 +151,7 @@ app.MapPut("/api/v1/posts/{tweetId}", async (string tweetId, UpdatePostRequest r
 {
     if (!string.Equals(tweetId, request.tweet_id, StringComparison.Ordinal))
         return Results.BadRequest(ApiError.BadRequest("TWEET_ID_MISMATCH", "URL の tweet_id と本文の tweet_id が一致しません。"));
-    var validationError = ValidateUpdateRequest(request);
+    var validationError = ValidateUpdateRequestClean(request);
     if (validationError is not null) return Results.BadRequest(validationError);
     if (!DateTimeOffset.TryParse(request.created_at, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var createdAt))
         return Results.BadRequest(ApiError.BadRequest("CREATED_AT_INVALID", "created_at は ISO 8601 形式で指定してください。"));
@@ -323,6 +323,29 @@ static ApiError? ValidateUpdateRequest(UpdatePostRequest request)
     return null;
 }
 
+static ApiError? ValidateUpdateRequestClean(UpdatePostRequest request)
+{
+    if (request.tags is null) return ApiError.BadRequest("TAGS_REQUIRED", "tags は配列で指定してください。");
+    if (request.video_playlists is null) return ApiError.BadRequest("VIDEO_PLAYLISTS_REQUIRED", "video_playlists は配列で指定してください。");
+    if (string.IsNullOrWhiteSpace(request.tweet_id)) return ApiError.BadRequest("TWEET_ID_REQUIRED", "tweet_id は必須です。");
+    if (!Regex.IsMatch(request.tweet_id, @"^\d+$")) return ApiError.BadRequest("TWEET_ID_INVALID", "tweet_id は数字のみで指定してください。");
+    if (string.IsNullOrWhiteSpace(request.url)) return ApiError.BadRequest("URL_REQUIRED", "url は必須です。");
+    if (string.IsNullOrWhiteSpace(request.author.handle)) return ApiError.BadRequest("AUTHOR_HANDLE_REQUIRED", "author.handle は必須です。");
+    if (string.IsNullOrWhiteSpace(request.author.name)) return ApiError.BadRequest("AUTHOR_NAME_REQUIRED", "author.name は必須です。");
+    if (string.IsNullOrWhiteSpace(request.created_at)) return ApiError.BadRequest("CREATED_AT_REQUIRED", "created_at は必須です。");
+    if (!string.IsNullOrWhiteSpace(request.quoted_tweet_id) && !Regex.IsMatch(request.quoted_tweet_id, @"^\d+$")) return ApiError.BadRequest("QUOTED_TWEET_ID_INVALID", "quoted_tweet_id は数字のみで指定してください。");
+    if (!UrlUtil.IsAllowedPostUrl(request.url)) return ApiError.BadRequest("URL_INVALID", "url は X の投稿 URL を指定してください。");
+    foreach (var video in request.video_playlists)
+    {
+        if (!UrlUtil.IsAllowedVideoUrl(video.m3u8_url))
+        {
+            return ApiError.BadRequest("VIDEO_URL_INVALID", $"許可されていない動画 URL です: {video.m3u8_url}");
+        }
+    }
+
+    return null;
+}
+
 static async Task DownloadFileAsync(HttpClient client, string url, string outPath, CancellationToken ct)
 {
     using var response = await client.GetAsync(url, ct);
@@ -484,14 +507,35 @@ static class Video
 
         for (var attempt = 0; attempt <= retryCount; attempt++)
         {
-            var args = $"-nostdin -v error -y -i \"{sourceUrl}\" -map 0:v:0 -map 0:a? -c copy -movflags +faststart";
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                RedirectStandardError = true,
+                RedirectStandardOutput = false,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+            psi.ArgumentList.Add("-nostdin");
+            psi.ArgumentList.Add("-v");
+            psi.ArgumentList.Add("error");
+            psi.ArgumentList.Add("-y");
+            psi.ArgumentList.Add("-i");
+            psi.ArgumentList.Add(sourceUrl);
+            psi.ArgumentList.Add("-map");
+            psi.ArgumentList.Add("0:v:0");
+            psi.ArgumentList.Add("-map");
+            psi.ArgumentList.Add("0:a?");
+            psi.ArgumentList.Add("-c");
+            psi.ArgumentList.Add("copy");
+            psi.ArgumentList.Add("-movflags");
+            psi.ArgumentList.Add("+faststart");
             if (string.Equals(Path.GetExtension(outPath), ".mp4", StringComparison.OrdinalIgnoreCase))
             {
-                args += " -bsf:a aac_adtstoasc";
+                psi.ArgumentList.Add("-bsf:a");
+                psi.ArgumentList.Add("aac_adtstoasc");
             }
 
-            args += $" \"{outPath}\"";
-            var psi = new ProcessStartInfo { FileName = ffmpegPath, Arguments = args, RedirectStandardError = true, RedirectStandardOutput = false, UseShellExecute = false, CreateNoWindow = true };
+            psi.ArgumentList.Add(outPath);
             try
             {
                 using var process = Process.Start(psi);

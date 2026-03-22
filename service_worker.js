@@ -32,7 +32,14 @@ chrome.webRequest.onBeforeRequest.addListener(
     });
     m3u8ByTab.set(details.tabId, items.slice(-MAX_M3U8_PER_TAB));
   },
-  { urls: ["<all_urls>"] }
+  {
+    urls: [
+      "https://x.com/*",
+      "https://twitter.com/*",
+      "https://video.twimg.com/*",
+      "https://*.twimg.com/*"
+    ]
+  }
 );
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
