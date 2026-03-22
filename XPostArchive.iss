@@ -31,6 +31,7 @@ Source: "dist\publish\desktop\*"; DestDir: "{app}"; Flags: recursesubdirs ignore
 Source: "dist\publish\server\*"; DestDir: "{app}\server"; Flags: recursesubdirs ignoreversion
 Source: "manifest.json"; DestDir: "{app}\extension"; Flags: ignoreversion
 Source: "content.js"; DestDir: "{app}\extension"; Flags: ignoreversion
+Source: "page_hook.js"; DestDir: "{app}\extension"; Flags: ignoreversion
 Source: "service_worker.js"; DestDir: "{app}\extension"; Flags: ignoreversion
 
 [Icons]

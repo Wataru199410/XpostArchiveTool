@@ -24,6 +24,13 @@ echo [2/2] Server publish...
 dotnet publish "%ROOT%XPostArchive.Api.csproj" -c Release -r win-x64 -p:PublishSingleFile=true -p:SelfContained=true -o "%OUT%\server"
 if errorlevel 1 goto :error
 
+if exist "%OUT%\server\tools\DbDeletePost" rmdir /s /q "%OUT%\server\tools\DbDeletePost"
+if exist "%OUT%\server\XArchive" rmdir /s /q "%OUT%\server\XArchive"
+if exist "%OUT%\server\data" rmdir /s /q "%OUT%\server\data"
+if exist "%OUT%\server\manifest.json" del /f /q "%OUT%\server\manifest.json"
+if exist "%OUT%\server\package.json" del /f /q "%OUT%\server\package.json"
+if exist "%OUT%\server\package-lock.json" del /f /q "%OUT%\server\package-lock.json"
+
 mkdir "%FFMPEG_DST_DIR%"
 copy /y "%FFMPEG_SRC%" "%FFMPEG_DST_DIR%\ffmpeg.exe" >nul
 if errorlevel 1 goto :error
