@@ -470,7 +470,7 @@
                                                     </Border>
                                                     <StackPanel Grid.Column="1" Margin="12,0,0,0">
                                                         <TextBox Text="{Binding Display, Mode=OneWay}" FontWeight="SemiBold" Foreground="{StaticResource TextMain}" Style="{StaticResource SelectableTextDisplay}"/>
-                                                        <TextBox Text="{Binding StatusText, Mode=OneWay}" Margin="0,4,0,0" Foreground="{StaticResource Primary}" FontSize="12" Visibility="{Binding Type, Converter={StaticResource VideoItemStatusVisibilityConverter}}" Style="{StaticResource SelectableTextDisplay}"/>
+                                                        <TextBox Text="{Binding StatusTextDisplay, Mode=OneWay}" Margin="0,4,0,0" Foreground="{StaticResource Primary}" FontSize="12" Visibility="{Binding Type, Converter={StaticResource VideoItemStatusVisibilityConverter}}" Style="{StaticResource SelectableTextDisplay}"/>
                                                         <TextBox Text="{Binding FullPath, Mode=OneWay}" Margin="0,6,0,0" TextWrapping="Wrap" Foreground="{StaticResource TextSub}" FontSize="12" AcceptsReturn="True" Style="{StaticResource SelectableTextDisplay}"/>
                                                         <Button Content="&#x958B;&#x304F;"
                                                                 Width="72"

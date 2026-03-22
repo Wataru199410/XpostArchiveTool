@@ -1,5 +1,6 @@
 **/bin/
 **/obj/
+obj-api/
 server/data/
 server/XArchive/
 .vscode/

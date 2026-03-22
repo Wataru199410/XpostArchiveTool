@@ -29,9 +29,9 @@ public partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
-        InitializeSortOptions();
-        Loaded += MainWindow_Loaded;
-        Closing += MainWindow_Closing;
+        InitializeSortOptionsClean();
+        Loaded += MainWindow_Loaded_Clean;
+        Closing += MainWindow_Closing_Clean;
     }
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
@@ -42,7 +42,7 @@ public partial class MainWindow : Window
             MessageBox.Show(result.message, "API エラー", MessageBoxButton.OK, MessageBoxImage.Error);
         }
 
-        LoadSavedPosts();
+        LoadSavedPostsSafe();
         ShowHomeState();
     }
 
@@ -67,7 +67,7 @@ public partial class MainWindow : Window
     private void ReloadPosts_Click(object sender, RoutedEventArgs e)
     {
         var selectedDirPath = _selectedItem?.DirPath;
-        LoadSavedPosts();
+        LoadSavedPostsSafe();
 
         if (!string.IsNullOrWhiteSpace(selectedDirPath))
         {
@@ -93,7 +93,7 @@ public partial class MainWindow : Window
         _selectedItem = null;
         PostsCardList.SelectedItem = null;
         ShowHomeState();
-        UpdateTagSummary();
+        UpdateTagSummaryClean();
         ApplyFilter();
     }
 
@@ -131,7 +131,7 @@ public partial class MainWindow : Window
 
         NormalizeTagSelection(e);
         SyncSelectedTagsFromUi();
-        UpdateTagSummary();
+        UpdateTagSummaryClean();
         ApplyFilter();
     }
 
@@ -144,7 +144,7 @@ public partial class MainWindow : Window
 
         SetTagFilterSelectionSilently(() => TagFilterList.SelectedItems.Remove(item.DataContext));
         SyncSelectedTagsFromUi();
-        UpdateTagSummary();
+        UpdateTagSummaryClean();
         ApplyFilter();
         e.Handled = true;
     }
@@ -221,7 +221,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        OpenQuotedPost(item);
+        OpenQuotedPostClean(item);
     }
 
     private void CardOpenReferencingPost_Click(object sender, RoutedEventArgs e)
@@ -231,7 +231,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        OpenReferencingPost(item);
+        OpenReferencingPostClean(item);
     }
 
     private void CardDeletePost_Click(object sender, RoutedEventArgs e)
@@ -241,7 +241,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        DeletePost(item);
+        DeletePostClean(item);
     }
 
     private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
@@ -290,7 +290,7 @@ public partial class MainWindow : Window
         var window = new TagManagementWindow(TagCatalogStore.ResolveArchiveRootPath()) { Owner = this };
         window.ShowDialog();
 
-        LoadSavedPosts();
+        LoadSavedPostsSafe();
 
         if (!string.IsNullOrWhiteSpace(selectedDirPath))
         {
@@ -313,7 +313,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        var window = new TagEditWindow(_editableTags.Select(x => x.Name).ToList(), _tagCatalog, ApplyTagsFromEditor)
+        var window = new TagEditWindow(_editableTags.Select(x => x.Name).ToList(), _tagCatalog, ApplyTagsFromEditorClean)
         {
             Owner = this
         };
@@ -333,7 +333,7 @@ public partial class MainWindow : Window
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
-        if (!SaveSelectedPostChanges(tags, DetailNoteTextBox.Text ?? string.Empty, out var updated, out var errorMessage))
+        if (!SaveSelectedPostChangesClean(tags, DetailNoteTextBox.Text ?? string.Empty, out var updated, out var errorMessage))
         {
             SetMemoStatus(errorMessage, isError: true);
             return;
@@ -403,7 +403,7 @@ public partial class MainWindow : Window
         });
 
         SyncSelectedTagsFromUi();
-        UpdateTagSummary();
+        UpdateTagSummaryClean();
     }
 
     private void ApplyFilter()
@@ -525,7 +525,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        OpenQuotedPost(_selectedItem);
+        OpenQuotedPostClean(_selectedItem);
     }
 
     private void OpenReferencingPost_Click(object sender, RoutedEventArgs e)
@@ -535,7 +535,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        OpenReferencingPost(_selectedItem);
+        OpenReferencingPostClean(_selectedItem);
     }
 
     private void OpenQuotedPost(PostListItem item)
@@ -583,7 +583,7 @@ public partial class MainWindow : Window
             return new TagEditSaveResult(false, "投稿が選択されていません。");
         }
 
-        if (!SaveSelectedPostChanges(tags.ToList(), DetailNoteTextBox.Text ?? string.Empty, out var updated, out var errorMessage))
+        if (!SaveSelectedPostChangesClean(tags.ToList(), DetailNoteTextBox.Text ?? string.Empty, out var updated, out var errorMessage))
         {
             SetTagActionStatus(errorMessage, isError: true);
             return new TagEditSaveResult(false, errorMessage);
@@ -646,7 +646,7 @@ public partial class MainWindow : Window
             return;
         }
 
-        DeletePost(_selectedItem);
+        DeletePostClean(_selectedItem);
     }
 
     private void DeletePost(PostListItem target)
@@ -718,7 +718,7 @@ public partial class MainWindow : Window
             deleteTweetIds.AddRange(referencingTweetIds);
         }
 
-        if (!DesktopArchiveStore.DeletePostsByTweetIds(deleteTweetIds, out var errorMessage))
+        if (!DesktopArchiveStore.DeletePostsByTweetIdsSafe(deleteTweetIds, out var errorMessage))
         {
             MessageBox.Show(errorMessage, "投稿の削除に失敗しました", MessageBoxButton.OK, MessageBoxImage.Error);
             return;
@@ -777,6 +777,305 @@ public partial class MainWindow : Window
     {
         InputMethod.SetIsInputMethodEnabled(textBox, true);
         InputMethod.SetPreferredImeState(textBox, InputMethodState.DoNotCare);
+    }
+
+    private async void MainWindow_Loaded_Clean(object sender, RoutedEventArgs e)
+    {
+        var result = await App.ApiManager.EnsureStartedAsync();
+        if (!result.ok)
+        {
+            MessageBox.Show(result.message, "API エラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+
+        LoadSavedPostsSafe();
+        ShowHomeState();
+    }
+
+    private void MainWindow_Closing_Clean(object? sender, CancelEventArgs e)
+    {
+        var activeDownloads = DesktopArchiveStore.GetActiveVideoDownloadCount();
+        if (activeDownloads <= 0)
+        {
+            return;
+        }
+
+        var message = activeDownloads == 1
+            ? "動画をバックグラウンドで保存中です。アプリを終了すると中断されます。終了しますか？"
+            : $"動画を {activeDownloads} 件バックグラウンドで保存中です。アプリを終了すると中断されます。終了しますか？";
+        var result = MessageBox.Show(message, "動画保存中", MessageBoxButton.YesNo, MessageBoxImage.Warning);
+        if (result != MessageBoxResult.Yes)
+        {
+            e.Cancel = true;
+        }
+    }
+
+    private void LoadSavedPostsSafe()
+    {
+        _allItems = DesktopArchiveStore.LoadPosts();
+        if (!string.IsNullOrWhiteSpace(DesktopArchiveStore.LastLoadError))
+        {
+            MessageBox.Show($"保存済み投稿の読み込みに失敗しました。\n\n{DesktopArchiveStore.LastLoadError}", "読み込みエラー", MessageBoxButton.OK, MessageBoxImage.Error);
+        }
+
+        _tagCatalog = TagCatalogStore.LoadCatalog();
+        BuildTagFiltersSafe();
+        UpdateTagSummaryClean();
+        ApplyFilter();
+    }
+
+    private void BuildTagFiltersSafe()
+    {
+        var tagCounts = _tagCatalog
+            .OrderByDescending(x => x.Count)
+            .ThenBy(x => x.Name, StringComparer.CurrentCulture)
+            .Select(x => new TagFilterItem
+            {
+                Key = x.Name,
+                Name = x.Name,
+                Count = x.Count
+            })
+            .ToList();
+
+        tagCounts.Insert(0, new TagFilterItem
+        {
+            Key = "__UNTAGGED__",
+            Name = "絞り込み: タグなし",
+            Count = _allItems.Count(x => x.TagList.Count == 0),
+            IsSpecial = true
+        });
+        tagCounts.Insert(0, new TagFilterItem
+        {
+            Key = "__ALL__",
+            Name = "絞り込み: すべて",
+            Count = _allItems.Count,
+            IsSpecial = true
+        });
+
+        TagFilterList.ItemsSource = tagCounts;
+
+        SetTagFilterSelectionSilently(() =>
+        {
+            TagFilterList.UnselectAll();
+
+            if (string.Equals(_selectedSpecialFilter, "__UNTAGGED__", StringComparison.Ordinal))
+            {
+                var untagged = tagCounts.FirstOrDefault(x => x.Key == "__UNTAGGED__");
+                if (untagged is not null)
+                {
+                    TagFilterList.SelectedItems.Add(untagged);
+                }
+
+                return;
+            }
+
+            if (string.Equals(_selectedSpecialFilter, "__ALL__", StringComparison.Ordinal) || _selectedTags.Count == 0)
+            {
+                var all = tagCounts.FirstOrDefault(x => x.Key == "__ALL__");
+                if (all is not null)
+                {
+                    TagFilterList.SelectedItems.Add(all);
+                }
+
+                return;
+            }
+
+            foreach (var item in tagCounts.Where(x => !x.IsSpecial && _selectedTags.Contains(x.Key)))
+            {
+                TagFilterList.SelectedItems.Add(item);
+            }
+        });
+
+        SyncSelectedTagsFromUi();
+    }
+
+    private void InitializeSortOptionsClean()
+    {
+        SortOrderComboBox.ItemsSource = new[]
+        {
+            new SortOptionItem("保存日時: 新しい順", SortOption.SavedAtDesc),
+            new SortOptionItem("保存日時: 古い順", SortOption.SavedAtAsc),
+            new SortOptionItem("投稿日時: 新しい順", SortOption.CreatedAtDesc),
+            new SortOptionItem("投稿日時: 古い順", SortOption.CreatedAtAsc),
+            new SortOptionItem("投稿者名: A-Z", SortOption.AuthorAsc),
+            new SortOptionItem("投稿者名: Z-A", SortOption.AuthorDesc)
+        };
+        SortOrderComboBox.SelectedIndex = 0;
+    }
+
+    private void UpdateTagSummaryClean()
+    {
+        if (string.Equals(_selectedSpecialFilter, "__UNTAGGED__", StringComparison.Ordinal))
+        {
+            TagSummaryText.Text = "タグなしの投稿を表示中";
+            return;
+        }
+
+        if (_selectedTags.Count == 0)
+        {
+            TagSummaryText.Text = "すべての投稿を表示中";
+            return;
+        }
+
+        TagSummaryText.Text = $"タグ: {string.Join("・", _selectedTags.OrderBy(x => x, StringComparer.CurrentCulture))} を含む";
+    }
+
+    private void OpenQuotedPostClean(PostListItem item)
+    {
+        if (string.IsNullOrWhiteSpace(item.QuotedTweetId))
+        {
+            return;
+        }
+
+        var quotedItem = _allItems.FirstOrDefault(x => string.Equals(x.TweetId, item.QuotedTweetId, StringComparison.Ordinal));
+        if (quotedItem is null)
+        {
+            MessageBox.Show("引用元の投稿は一覧に見つかりません。", "引用元が見つかりません", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        PostsCardList.SelectedItem = quotedItem;
+        PostsCardList.ScrollIntoView(quotedItem);
+        ShowPostDetail(quotedItem);
+    }
+
+    private void OpenReferencingPostClean(PostListItem item)
+    {
+        if (string.IsNullOrWhiteSpace(item.ReferencedByTweetId))
+        {
+            return;
+        }
+
+        var referencingItem = _allItems.FirstOrDefault(x => string.Equals(x.TweetId, item.ReferencedByTweetId, StringComparison.Ordinal));
+        if (referencingItem is null)
+        {
+            MessageBox.Show("引用先の投稿は一覧に見つかりません。", "引用先が見つかりません", MessageBoxButton.OK, MessageBoxImage.Information);
+            return;
+        }
+
+        PostsCardList.SelectedItem = referencingItem;
+        PostsCardList.ScrollIntoView(referencingItem);
+        ShowPostDetail(referencingItem);
+    }
+
+    private TagEditSaveResult ApplyTagsFromEditorClean(IReadOnlyList<string> tags)
+    {
+        if (_selectedItem is null)
+        {
+            return new TagEditSaveResult(false, "投稿が選択されていません。");
+        }
+
+        if (!SaveSelectedPostChangesClean(tags.ToList(), DetailNoteTextBox.Text ?? string.Empty, out var updated, out var errorMessage))
+        {
+            SetTagActionStatus(errorMessage, isError: true);
+            return new TagEditSaveResult(false, errorMessage);
+        }
+
+        SetTagActionStatus("タグを保存しました。", isSuccess: true);
+        ShowPostDetail(updated);
+        return new TagEditSaveResult(true, "タグを保存しました。");
+    }
+
+    private bool SaveSelectedPostChangesClean(List<string> tags, string note, out PostListItem updated, out string errorMessage)
+    {
+        updated = _selectedItem!;
+        errorMessage = string.Empty;
+
+        if (_selectedItem is null)
+        {
+            errorMessage = "投稿が選択されていません。";
+            return false;
+        }
+
+        var targetDir = _selectedItem.DirPath;
+        if (!DesktopArchiveStore.SavePostChanges(targetDir, tags, note, out errorMessage))
+        {
+            return false;
+        }
+
+        LoadSavedPostsSafe();
+        updated = _allItems.FirstOrDefault(x => x.DirPath == targetDir) ?? _selectedItem;
+        PostsCardList.SelectedItem = updated;
+        return true;
+    }
+
+    private void DeletePostClean(PostListItem target)
+    {
+        var deleteQuoted = false;
+        var deleteReferencing = false;
+        var referencingTweetIds = _allItems
+            .Where(x => string.Equals(x.QuotedTweetId, target.TweetId, StringComparison.Ordinal))
+            .Select(x => x.TweetId)
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Distinct(StringComparer.Ordinal)
+            .ToList();
+
+        if (target.HasQuotedPost)
+        {
+            var choice = MessageBox.Show(
+                "この投稿には引用元の投稿があります。\n\nはい: 引用元の投稿も含めて削除\nいいえ: この投稿だけ削除\nキャンセル: 中止",
+                "投稿を削除",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Warning);
+
+            if (choice == MessageBoxResult.Cancel)
+            {
+                return;
+            }
+
+            deleteQuoted = choice == MessageBoxResult.Yes;
+        }
+        else
+        {
+            var confirm = MessageBox.Show(
+                "この投稿を削除しますか？",
+                "投稿を削除",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+
+            if (confirm != MessageBoxResult.Yes)
+            {
+                return;
+            }
+        }
+
+        if (referencingTweetIds.Count > 0)
+        {
+            var referencingMessage = referencingTweetIds.Count == 1
+                ? "この投稿を引用している引用先の投稿が 1 件あります。\n\nはい: 引用先の投稿も含めて削除\nいいえ: この投稿だけ削除\nキャンセル: 中止"
+                : $"この投稿を引用している引用先の投稿が {referencingTweetIds.Count} 件あります。\n\nはい: 引用先の投稿も含めて削除\nいいえ: この投稿だけ削除\nキャンセル: 中止";
+            var choice = MessageBox.Show(
+                referencingMessage,
+                "投稿を削除",
+                MessageBoxButton.YesNoCancel,
+                MessageBoxImage.Warning);
+
+            if (choice == MessageBoxResult.Cancel)
+            {
+                return;
+            }
+
+            deleteReferencing = choice == MessageBoxResult.Yes;
+        }
+
+        var deleteTweetIds = new List<string> { target.TweetId };
+        if (deleteQuoted && target.HasQuotedPost)
+        {
+            deleteTweetIds.Add(target.QuotedTweetId);
+        }
+        if (deleteReferencing)
+        {
+            deleteTweetIds.AddRange(referencingTweetIds);
+        }
+
+        if (!DesktopArchiveStore.DeletePostsByTweetIdsSafe(deleteTweetIds, out var errorMessage))
+        {
+            MessageBox.Show(errorMessage, "投稿の削除に失敗しました", MessageBoxButton.OK, MessageBoxImage.Error);
+            return;
+        }
+
+        LoadSavedPostsSafe();
+        PostsCardList.SelectedItem = null;
+        ShowHomeState("左の一覧から投稿を選択してください。");
     }
 
     private void InitializeSortOptions()
@@ -932,6 +1231,13 @@ public sealed class MediaFileItem
     public string FullPath { get; init; } = string.Empty;
     public string DownloadStatus { get; init; } = "completed";
     public string DownloadError { get; init; } = string.Empty;
+    public string StatusTextDisplay => DownloadStatus switch
+    {
+        "pending" => "動画は保存待ちです",
+        "downloading" => "動画をバックグラウンドで保存中です",
+        "failed" => string.IsNullOrWhiteSpace(DownloadError) ? "動画保存に失敗しました" : $"動画保存に失敗しました: {DownloadError}",
+        _ => "動画保存済み"
+    };
     public string StatusText => DownloadStatus switch
     {
         "pending" => "動画は保存待ちです",

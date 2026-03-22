@@ -168,6 +168,10 @@ app.MapPut("/api/v1/posts/{tweetId}", async (string tweetId, UpdatePostRequest r
             .Select((x, index) => new MediaRow("video", x.m3u8_url, Path.Combine("videos", $"{(index + 1):000}.{Video.GetPreferredExtension(x.m3u8_url)}").Replace('\\', '/'), index))
             .ToList();
         await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
+        if (false && await Db.HasActiveVideoDownloadsAsync(conn, tx, existing.id, ct))
+        {
+            return Results.Conflict(ApiError.Conflict("VIDEO_DOWNLOAD_IN_PROGRESS", "動画をバックグラウンドで保存中のため、投稿はまだ更新できません。動画保存完了後に再度お試しください。"));
+        }
         var authorId = await Db.UpsertAuthorAsync(conn, tx, request.author.handle, request.author.name, DateTimeOffset.Now, ct);
         var quotedPostId = await Db.ResolveQuotedPostIdAsync(conn, tx, request.quoted_tweet_id, ct);
         if (!string.IsNullOrWhiteSpace(request.quoted_tweet_id) && quotedPostId is null)
@@ -176,24 +180,103 @@ app.MapPut("/api/v1/posts/{tweetId}", async (string tweetId, UpdatePostRequest r
         }
         await Db.UpdatePostAsync(conn, tx, existing.id, request.url, authorId, quotedPostId, createdAt, request.text ?? string.Empty, request.note, ct);
         await Db.ReplacePostTagsAsync(conn, tx, existing.id, tags, DateTimeOffset.Now, ct);
+        var existingVideos = await Db.LoadMediaByTypeAsync(conn, tx, existing.id, "video", ct);
         var videoJobs = new List<VideoDownloadJob>();
-        foreach (var media in videos)
+        var filesToDeleteAfterCommit = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var hasRequestedVideoUpdate = videos.Count > 0;
+        var requestedVideoKeys = new HashSet<string>(videos.Select(x => $"{x.local_path}\n{x.original_url ?? string.Empty}"), StringComparer.OrdinalIgnoreCase);
+        var existingVideoKeys = new HashSet<string>(existingVideos.Select(x => $"{x.local_path}\n{x.original_url}"), StringComparer.OrdinalIgnoreCase);
+        var requestedVideosNeedRepair = hasRequestedVideoUpdate && videos.Any(media =>
         {
             var fullPath = Path.Combine(existing.dir_path, media.local_path);
-            if (File.Exists(fullPath) && Video.IsUsableSavedVideoFile(fullPath))
+            return !existingVideos.Any(x =>
+                string.Equals(x.local_path, media.local_path, StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(x.original_url, media.original_url ?? string.Empty, StringComparison.OrdinalIgnoreCase) &&
+                x.download_status == "completed" &&
+                File.Exists(fullPath) &&
+                Video.IsUsableSavedVideoFile(fullPath));
+        });
+        var requestedVideosMatchExisting = hasRequestedVideoUpdate
+            && requestedVideoKeys.Count == existingVideoKeys.Count
+            && requestedVideoKeys.SetEquals(existingVideoKeys)
+            && !requestedVideosNeedRepair;
+        var hasActiveVideoDownloads = await Db.HasActiveVideoDownloadsAsync(conn, tx, existing.id, ct);
+
+        if (hasActiveVideoDownloads && hasRequestedVideoUpdate && !requestedVideosMatchExisting)
+        {
+            return Results.Conflict(ApiError.Conflict("VIDEO_DOWNLOAD_IN_PROGRESS", "動画をバックグラウンドで保存中のため、動画の変更はまだ反映できません。動画保存完了後に再度お試しください。"));
+        }
+
+        if (hasRequestedVideoUpdate && !requestedVideosMatchExisting)
+        {
+            var desiredLocalPaths = new HashSet<string>(videos.Select(x => x.local_path), StringComparer.OrdinalIgnoreCase);
+            foreach (var existingVideo in existingVideos.Where(x => !desiredLocalPaths.Contains(x.local_path)))
             {
-                continue;
+                var obsoleteFullPath = Path.Combine(existing.dir_path, existingVideo.local_path);
+                if (File.Exists(obsoleteFullPath))
+                {
+                    filesToDeleteAfterCommit.Add(obsoleteFullPath);
+                }
             }
 
-            if (File.Exists(fullPath))
-            {
-                File.Delete(fullPath);
-            }
+            await Db.DeleteMediaByLocalPathsAsync(conn, tx, existing.id, "video", existingVideos.Where(x => !desiredLocalPaths.Contains(x.local_path)).Select(x => x.local_path).ToList(), ct);
 
-            var mediaId = await Db.InsertMediaAsync(conn, tx, existing.id, media, "pending", null, ct);
-            videoJobs.Add(new VideoDownloadJob(mediaId, media.original_url ?? string.Empty, fullPath, appConfig.VideoRetryCount));
+            foreach (var media in videos)
+            {
+                var fullPath = Path.Combine(existing.dir_path, media.local_path);
+                var matchingRows = existingVideos.Where(x => string.Equals(x.local_path, media.local_path, StringComparison.OrdinalIgnoreCase)).ToList();
+                var hasReusableRow = matchingRows.Any(x =>
+                    string.Equals(x.original_url, media.original_url, StringComparison.OrdinalIgnoreCase) &&
+                    x.download_status == "completed" &&
+                    File.Exists(fullPath) &&
+                    Video.IsUsableSavedVideoFile(fullPath));
+
+                if (hasReusableRow)
+                {
+                    var rowToKeep = matchingRows
+                        .First(x =>
+                            string.Equals(x.original_url, media.original_url, StringComparison.OrdinalIgnoreCase) &&
+                            x.download_status == "completed" &&
+                            File.Exists(fullPath) &&
+                            Video.IsUsableSavedVideoFile(fullPath));
+                    var duplicateIds = matchingRows.Where(x => x.id != rowToKeep.id).Select(x => x.id).ToList();
+                    if (duplicateIds.Count > 0)
+                    {
+                        await Db.DeleteMediaByIdsAsync(conn, tx, duplicateIds, ct);
+                    }
+
+                    continue;
+                }
+
+                if (matchingRows.Count > 0)
+                {
+                    await Db.DeleteMediaByIdsAsync(conn, tx, matchingRows.Select(x => x.id).ToList(), ct);
+                }
+
+                if (File.Exists(fullPath))
+                {
+                    filesToDeleteAfterCommit.Add(fullPath);
+                }
+
+                var mediaId = await Db.InsertMediaAsync(conn, tx, existing.id, media, "pending", null, ct);
+                videoJobs.Add(new VideoDownloadJob(mediaId, media.original_url ?? string.Empty, fullPath, appConfig.VideoRetryCount));
+            }
         }
         await tx.CommitAsync(ct);
+        foreach (var filePath in filesToDeleteAfterCommit)
+        {
+            try
+            {
+                if (File.Exists(filePath))
+                {
+                    File.Delete(filePath);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"VIDEO_UPDATE_DELETE_FAILED path={filePath} error={ex.Message}");
+            }
+        }
         foreach (var job in videoJobs)
         {
             videoQueue.Enqueue(job);
@@ -1081,6 +1164,93 @@ WHERE media_type = 'video'
             var tagId = await UpsertTagAsync(conn, tx, tag, now, ct);
             await InsertPostTagAsync(conn, tx, postId, tagId, now, ct);
         }
+    }
+
+    public static async Task<bool> HasActiveVideoDownloadsAsync(SqliteConnection conn, SqliteTransaction tx, long postId, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = @"
+SELECT COUNT(1)
+FROM media
+WHERE post_id = $post_id
+  AND media_type = 'video'
+  AND COALESCE(download_status, 'completed') IN ('pending', 'downloading')";
+        cmd.Parameters.AddWithValue("$post_id", postId);
+        var count = Convert.ToInt32(await cmd.ExecuteScalarAsync(ct) ?? 0);
+        return count > 0;
+    }
+
+    public static async Task DeleteMediaByTypeAsync(SqliteConnection conn, SqliteTransaction tx, long postId, string mediaType, CancellationToken ct)
+    {
+        await using var delete = conn.CreateCommand();
+        delete.Transaction = tx;
+        delete.CommandText = "DELETE FROM media WHERE post_id = $post_id AND media_type = $media_type";
+        delete.Parameters.AddWithValue("$post_id", postId);
+        delete.Parameters.AddWithValue("$media_type", mediaType);
+        await delete.ExecuteNonQueryAsync(ct);
+    }
+
+    public static async Task<List<(long id, string local_path, string download_status, string original_url)>> LoadMediaByTypeAsync(SqliteConnection conn, SqliteTransaction tx, long postId, string mediaType, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT id, local_path, COALESCE(download_status, 'completed'), COALESCE(original_url, '') FROM media WHERE post_id = $post_id AND media_type = $media_type ORDER BY sort_order ASC, id ASC";
+        cmd.Parameters.AddWithValue("$post_id", postId);
+        cmd.Parameters.AddWithValue("$media_type", mediaType);
+
+        var rows = new List<(long id, string local_path, string download_status, string original_url)>();
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            rows.Add((reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3)));
+        }
+
+        return rows;
+    }
+
+    public static async Task DeleteMediaByIdsAsync(SqliteConnection conn, SqliteTransaction tx, IReadOnlyCollection<long> mediaIds, CancellationToken ct)
+    {
+        if (mediaIds.Count == 0)
+        {
+            return;
+        }
+
+        await using var delete = conn.CreateCommand();
+        delete.Transaction = tx;
+        var placeholders = mediaIds.Select((_, index) => $"$id{index}").ToList();
+        delete.CommandText = $"DELETE FROM media WHERE id IN ({string.Join(", ", placeholders)})";
+        var indexParam = 0;
+        foreach (var mediaId in mediaIds)
+        {
+            delete.Parameters.AddWithValue($"$id{indexParam}", mediaId);
+            indexParam++;
+        }
+
+        await delete.ExecuteNonQueryAsync(ct);
+    }
+
+    public static async Task DeleteMediaByLocalPathsAsync(SqliteConnection conn, SqliteTransaction tx, long postId, string mediaType, IReadOnlyCollection<string> localPaths, CancellationToken ct)
+    {
+        if (localPaths.Count == 0)
+        {
+            return;
+        }
+
+        await using var delete = conn.CreateCommand();
+        delete.Transaction = tx;
+        var placeholders = localPaths.Select((_, index) => $"$path{index}").ToList();
+        delete.CommandText = $"DELETE FROM media WHERE post_id = $post_id AND media_type = $media_type AND local_path IN ({string.Join(", ", placeholders)})";
+        delete.Parameters.AddWithValue("$post_id", postId);
+        delete.Parameters.AddWithValue("$media_type", mediaType);
+        var indexParam = 0;
+        foreach (var localPath in localPaths)
+        {
+            delete.Parameters.AddWithValue($"$path{indexParam}", localPath);
+            indexParam++;
+        }
+
+        await delete.ExecuteNonQueryAsync(ct);
     }
 }
 static class TagCatalog

@@ -11,8 +11,10 @@
     <Compile Remove="Program.cs" />
     <Compile Remove="tools\**\*.cs" />
     <Compile Remove="tools\**\obj\**\*.cs" />
+    <Compile Remove="obj-api\**\*.cs" />
     <None Remove="schema.sql" />
     <None Remove="tools\**" />
+    <None Remove="obj-api\**" />
   </ItemGroup>
 
   <ItemGroup>

@@ -1,12 +1,18 @@
+using System.Diagnostics;
 using System.IO;
+using System.Net.Http;
 using Microsoft.Data.Sqlite;
 
 namespace XPostArchive.Desktop;
 
 internal static class DesktopArchiveStore
 {
+    public static string? LastLoadError { get; private set; }
+
     public static List<PostListItem> LoadPosts()
     {
+        LastLoadError = null;
+
         var dbPath = TagCatalogStore.ResolveDatabasePath();
         if (!File.Exists(dbPath))
         {
@@ -17,6 +23,10 @@ internal static class DesktopArchiveStore
         {
             using var conn = new SqliteConnection($"Data Source={dbPath}");
             conn.Open();
+            if (!IsApiPossiblyRunningSafe())
+            {
+                MarkAllInterruptedVideoDownloadsSafe(conn);
+            }
 
             var posts = LoadPostRows(conn);
             var tagsByPostId = LoadTagsByPostId(conn);
@@ -108,8 +118,9 @@ internal static class DesktopArchiveStore
                 })
                 .ToList();
         }
-        catch
+        catch (Exception ex)
         {
+            LastLoadError = ex.Message;
             return [];
         }
     }
@@ -235,6 +246,9 @@ ON CONFLICT(post_id, tag_id) DO NOTHING;";
 
     public static bool DeletePostsByTweetIds(IEnumerable<string> tweetIds, out string errorMessage)
     {
+        return DeletePostsByTweetIdsSafe(tweetIds, out errorMessage);
+
+#if false
         errorMessage = string.Empty;
 
         var dbPath = TagCatalogStore.ResolveDatabasePath();
@@ -246,15 +260,6 @@ ON CONFLICT(post_id, tag_id) DO NOTHING;";
 
         try
         {
-            using var conn = new SqliteConnection($"Data Source={dbPath}");
-            conn.Open();
-            using (var pragma = conn.CreateCommand())
-            {
-                pragma.CommandText = "PRAGMA foreign_keys = ON;";
-                pragma.ExecuteNonQuery();
-            }
-
-            using var tx = conn.BeginTransaction();
             var deleteTargets = tweetIds
                 .Where(static x => !string.IsNullOrWhiteSpace(x))
                 .Distinct(StringComparer.Ordinal)
@@ -266,42 +271,171 @@ ON CONFLICT(post_id, tag_id) DO NOTHING;";
                 return false;
             }
 
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            using (var pragma = conn.CreateCommand())
+            {
+                pragma.CommandText = "PRAGMA foreign_keys = ON;";
+                pragma.ExecuteNonQuery();
+            }
+
             var postIds = new List<long>(deleteTargets.Count);
             var dirPaths = new List<string>(deleteTargets.Count);
-            foreach (var tweetId in deleteTargets)
+            using (var tx = conn.BeginTransaction())
             {
-                using var select = conn.CreateCommand();
-                select.Transaction = tx;
-                select.CommandText = "SELECT id, dir_path FROM posts WHERE tweet_id = $tweet_id LIMIT 1";
-                select.Parameters.AddWithValue("$tweet_id", tweetId);
-                using var reader = select.ExecuteReader();
-                if (!reader.Read())
+                foreach (var tweetId in deleteTargets)
                 {
-                    errorMessage = "削除対象の投稿が見つかりません。";
+                    using var select = conn.CreateCommand();
+                    select.Transaction = tx;
+                    select.CommandText = "SELECT id, dir_path FROM posts WHERE tweet_id = $tweet_id LIMIT 1";
+                    select.Parameters.AddWithValue("$tweet_id", tweetId);
+                    using var reader = select.ExecuteReader();
+                    if (!reader.Read())
+                    {
+                        errorMessage = "削除対象の投稿が見つかりません。";
+                        return false;
+                    }
+
+                    postIds.Add(reader.GetInt64(0));
+                    dirPaths.Add(reader.GetString(1));
+                }
+            }
+
+            if (HasActiveVideoDownloads(conn, postIds))
+            {
+                errorMessage = "動画をバックグラウンドで保存中の投稿は削除できません。動画保存完了後に再度お試しください。";
+                return false;
+            }
+
+            var movedDirectories = MoveDirectoriesToTrash(dirPaths.Distinct(StringComparer.Ordinal).ToList(), out errorMessage);
+            if (movedDirectories is null)
+            {
+                return false;
+            }
+
+            try
+            {
+                using var tx = conn.BeginTransaction();
+                foreach (var postId in postIds)
+                {
+                    using var delete = conn.CreateCommand();
+                    delete.Transaction = tx;
+                    delete.CommandText = "DELETE FROM posts WHERE id = $id";
+                    delete.Parameters.AddWithValue("$id", postId);
+                    delete.ExecuteNonQuery();
+                }
+
+                tx.Commit();
+            }
+            catch (Exception ex)
+            {
+                TryRestoreDirectories(movedDirectories);
+                errorMessage = ex.Message;
+                return false;
+            }
+
+            TryDeleteMovedDirectories(movedDirectories);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+            return false;
+        }
+#endif
+    }
+
+    public static bool DeletePostsByTweetIdsSafe(IEnumerable<string> tweetIds, out string errorMessage)
+    {
+        return DeletePostsByTweetIdsSafeCore(tweetIds, out errorMessage);
+
+#if false
+        errorMessage = string.Empty;
+
+        var dbPath = TagCatalogStore.ResolveDatabasePath();
+        if (!File.Exists(dbPath))
+        {
+            errorMessage = "archive.db が見つかりません。";
+            return false;
+        }
+
+        try
+        {
+            var deleteTargets = tweetIds
+                .Where(static x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (deleteTargets.Count == 0)
+            {
+                errorMessage = "削除対象の投稿が見つかりません。";
+                return false;
+            }
+
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            using (var pragma = conn.CreateCommand())
+            {
+                pragma.CommandText = "PRAGMA foreign_keys = ON;";
+                pragma.ExecuteNonQuery();
+            }
+
+            var postIds = new List<long>(deleteTargets.Count);
+            var dirPaths = new List<string>(deleteTargets.Count);
+            using (var tx = conn.BeginTransaction())
+            {
+                foreach (var tweetId in deleteTargets)
+                {
+                    using var select = conn.CreateCommand();
+                    select.Transaction = tx;
+                    select.CommandText = "SELECT id, dir_path FROM posts WHERE tweet_id = $tweet_id LIMIT 1";
+                    select.Parameters.AddWithValue("$tweet_id", tweetId);
+                    using var reader = select.ExecuteReader();
+                    if (!reader.Read())
+                    {
+                        errorMessage = "削除対象の投稿が見つかりません。";
+                        return false;
+                    }
+
+                    postIds.Add(reader.GetInt64(0));
+                    dirPaths.Add(reader.GetString(1));
+                }
+            }
+
+            if (HasActiveVideoDownloadsSafe(conn, postIds))
+            {
+                if (IsApiPossiblyRunningSafe())
+                {
+                    errorMessage = "動画をバックグラウンドで保存中の投稿は削除できません。動画保存完了後に再度お試しください。";
                     return false;
                 }
 
-                postIds.Add(reader.GetInt64(0));
-                dirPaths.Add(reader.GetString(1));
-            }
-
-            foreach (var postId in postIds)
-            {
-                using var delete = conn.CreateCommand();
-                delete.Transaction = tx;
-                delete.CommandText = "DELETE FROM posts WHERE id = $id";
-                delete.Parameters.AddWithValue("$id", postId);
-                delete.ExecuteNonQuery();
-            }
-
-            tx.Commit();
-
-            foreach (var dirPath in dirPaths.Distinct(StringComparer.Ordinal))
-            {
-                if (Directory.Exists(dirPath))
+                MarkVideoDownloadsFailedSafe(conn, postIds);
+                if (HasActiveVideoDownloadsSafe(conn, postIds))
                 {
-                    Directory.Delete(dirPath, true);
+                    errorMessage = "動画保存状態を更新できなかったため、投稿を削除できませんでした。";
+                    return false;
                 }
+            }
+
+            using (var tx = conn.BeginTransaction())
+            {
+                foreach (var postId in postIds)
+                {
+                    using var delete = conn.CreateCommand();
+                    delete.Transaction = tx;
+                    delete.CommandText = "DELETE FROM posts WHERE id = $id";
+                    delete.Parameters.AddWithValue("$id", postId);
+                    delete.ExecuteNonQuery();
+                }
+
+                tx.Commit();
+            }
+
+            var movedDirectories = MoveDirectoriesToTrash(dirPaths.Distinct(StringComparer.Ordinal).ToList(), out _);
+            if (movedDirectories is not null)
+            {
+                TryDeleteMovedDirectories(movedDirectories);
             }
 
             return true;
@@ -310,6 +444,307 @@ ON CONFLICT(post_id, tag_id) DO NOTHING;";
         {
             errorMessage = ex.Message;
             return false;
+        }
+#endif
+    }
+
+    private static bool DeletePostsByTweetIdsSafeCore(IEnumerable<string> tweetIds, out string errorMessage)
+    {
+        errorMessage = string.Empty;
+
+        var dbPath = TagCatalogStore.ResolveDatabasePath();
+        if (!File.Exists(dbPath))
+        {
+            errorMessage = "archive.db が見つかりません。";
+            return false;
+        }
+
+        try
+        {
+            var deleteTargets = tweetIds
+                .Where(static x => !string.IsNullOrWhiteSpace(x))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (deleteTargets.Count == 0)
+            {
+                errorMessage = "削除対象の投稿が見つかりません。";
+                return false;
+            }
+
+            using var conn = new SqliteConnection($"Data Source={dbPath}");
+            conn.Open();
+            using (var pragma = conn.CreateCommand())
+            {
+                pragma.CommandText = "PRAGMA foreign_keys = ON;";
+                pragma.ExecuteNonQuery();
+            }
+
+            var postIds = new List<long>(deleteTargets.Count);
+            var dirPaths = new List<string>(deleteTargets.Count);
+            using (var tx = conn.BeginTransaction())
+            {
+                foreach (var tweetId in deleteTargets)
+                {
+                    using var select = conn.CreateCommand();
+                    select.Transaction = tx;
+                    select.CommandText = "SELECT id, dir_path FROM posts WHERE tweet_id = $tweet_id LIMIT 1";
+                    select.Parameters.AddWithValue("$tweet_id", tweetId);
+                    using var reader = select.ExecuteReader();
+                    if (!reader.Read())
+                    {
+                        errorMessage = "削除対象の投稿が見つかりません。";
+                        return false;
+                    }
+
+                    postIds.Add(reader.GetInt64(0));
+                    dirPaths.Add(reader.GetString(1));
+                }
+            }
+
+            if (HasActiveVideoDownloadsSafe(conn, postIds))
+            {
+                if (IsApiPossiblyRunningSafe())
+                {
+                    errorMessage = "動画をバックグラウンドで保存中の投稿は削除できません。動画保存完了後に再度お試しください。";
+                    return false;
+                }
+
+                MarkVideoDownloadsFailedSafe(conn, postIds);
+                if (HasActiveVideoDownloadsSafe(conn, postIds))
+                {
+                    errorMessage = "動画保存状態を更新できなかったため、投稿を削除できませんでした。";
+                    return false;
+                }
+            }
+
+            var movedDirectories = MoveDirectoriesToTrash(dirPaths.Distinct(StringComparer.Ordinal).ToList(), out errorMessage);
+            if (movedDirectories is null)
+            {
+                return false;
+            }
+
+            try
+            {
+                using var tx = conn.BeginTransaction();
+                foreach (var postId in postIds)
+                {
+                    using var delete = conn.CreateCommand();
+                    delete.Transaction = tx;
+                    delete.CommandText = "DELETE FROM posts WHERE id = $id";
+                    delete.Parameters.AddWithValue("$id", postId);
+                    delete.ExecuteNonQuery();
+                }
+
+                tx.Commit();
+            }
+            catch (Exception ex)
+            {
+                TryRestoreDirectories(movedDirectories);
+                errorMessage = ex.Message;
+                return false;
+            }
+
+            TryDeleteMovedDirectories(movedDirectories);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+            return false;
+        }
+    }
+
+    private static bool HasActiveVideoDownloads(SqliteConnection conn, IReadOnlyCollection<long> postIds)
+    {
+        if (postIds.Count == 0)
+        {
+            return false;
+        }
+
+        if (!IsApiAvailable())
+        {
+            return false;
+        }
+
+        using var cmd = conn.CreateCommand();
+        var placeholders = postIds.Select((_, index) => $"$id{index}").ToList();
+        cmd.CommandText = $@"
+SELECT COUNT(1)
+FROM media
+WHERE post_id IN ({string.Join(", ", placeholders)})
+  AND media_type = 'video'
+  AND COALESCE(download_status, 'completed') IN ('pending', 'downloading')";
+
+        var index = 0;
+        foreach (var postId in postIds)
+        {
+            cmd.Parameters.AddWithValue($"$id{index}", postId);
+            index++;
+        }
+
+        return Convert.ToInt32(cmd.ExecuteScalar() ?? 0) > 0;
+    }
+
+    private static bool HasActiveVideoDownloadsSafe(SqliteConnection conn, IReadOnlyCollection<long> postIds)
+    {
+        if (postIds.Count == 0)
+        {
+            return false;
+        }
+
+        using var cmd = conn.CreateCommand();
+        var placeholders = postIds.Select((_, index) => $"$id{index}").ToList();
+        cmd.CommandText = $@"
+SELECT COUNT(1)
+FROM media
+WHERE post_id IN ({string.Join(", ", placeholders)})
+  AND media_type = 'video'
+  AND COALESCE(download_status, 'completed') IN ('pending', 'downloading')";
+
+        var index = 0;
+        foreach (var postId in postIds)
+        {
+            cmd.Parameters.AddWithValue($"$id{index}", postId);
+            index++;
+        }
+
+        return Convert.ToInt32(cmd.ExecuteScalar() ?? 0) > 0;
+    }
+
+    private static void MarkVideoDownloadsFailedSafe(SqliteConnection conn, IReadOnlyCollection<long> postIds)
+    {
+        if (postIds.Count == 0)
+        {
+            return;
+        }
+
+        using var cmd = conn.CreateCommand();
+        var placeholders = postIds.Select((_, index) => $"$id{index}").ToList();
+        cmd.CommandText = $@"
+UPDATE media
+SET download_status = 'failed',
+    download_error = 'アプリ起動中に動画保存が中断されたため、削除前に失敗扱いへ更新しました。'
+WHERE post_id IN ({string.Join(", ", placeholders)})
+  AND media_type = 'video'
+  AND COALESCE(download_status, 'completed') IN ('pending', 'downloading')";
+
+        var index = 0;
+        foreach (var postId in postIds)
+        {
+            cmd.Parameters.AddWithValue($"$id{index}", postId);
+            index++;
+        }
+
+        cmd.ExecuteNonQuery();
+    }
+
+    private static void MarkAllInterruptedVideoDownloadsSafe(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = @"
+UPDATE media
+SET download_status = 'failed',
+    download_error = 'アプリ起動中に動画保存が中断されたため、失敗扱いへ更新しました。'
+WHERE media_type = 'video'
+  AND COALESCE(download_status, 'completed') IN ('pending', 'downloading')";
+        cmd.ExecuteNonQuery();
+    }
+
+    private static bool IsApiAvailable()
+    {
+        try
+        {
+            using var client = new HttpClient
+            {
+                Timeout = TimeSpan.FromSeconds(1)
+            };
+            using var response = client.GetAsync("http://127.0.0.1:18765/api/v1/health").GetAwaiter().GetResult();
+            return response.IsSuccessStatusCode;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsApiPossiblyRunningSafe()
+    {
+        if (IsApiAvailable())
+        {
+            return true;
+        }
+
+        if (Process.GetProcessesByName("XPostArchive.Api").Length > 0)
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static List<MovedDirectoryItem>? MoveDirectoriesToTrash(List<string> dirPaths, out string errorMessage)
+    {
+        errorMessage = string.Empty;
+        var movedDirectories = new List<MovedDirectoryItem>();
+        var trashRoot = Path.Combine(TagCatalogStore.ResolveArchiveRootPath(), ".trash", Guid.NewGuid().ToString("N"));
+
+        try
+        {
+            foreach (var sourcePath in dirPaths)
+            {
+                if (!Directory.Exists(sourcePath))
+                {
+                    continue;
+                }
+
+                var targetPath = Path.Combine(trashRoot, Path.GetFileName(sourcePath));
+                Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+                Directory.Move(sourcePath, targetPath);
+                movedDirectories.Add(new MovedDirectoryItem(sourcePath, targetPath));
+            }
+
+            return movedDirectories;
+        }
+        catch (Exception ex)
+        {
+            TryRestoreDirectories(movedDirectories);
+            errorMessage = ex.Message;
+            return null;
+        }
+    }
+
+    private static void TryRestoreDirectories(IEnumerable<MovedDirectoryItem> movedDirectories)
+    {
+        foreach (var item in movedDirectories.Reverse())
+        {
+            try
+            {
+                if (Directory.Exists(item.TempPath) && !Directory.Exists(item.OriginalPath))
+                {
+                    Directory.Move(item.TempPath, item.OriginalPath);
+                }
+            }
+            catch
+            {
+            }
+        }
+    }
+
+    private static void TryDeleteMovedDirectories(IEnumerable<MovedDirectoryItem> movedDirectories)
+    {
+        foreach (var item in movedDirectories)
+        {
+            try
+            {
+                if (Directory.Exists(item.TempPath))
+                {
+                    Directory.Delete(item.TempPath, true);
+                }
+            }
+            catch
+            {
+            }
         }
     }
 
@@ -431,14 +866,14 @@ ORDER BY m.post_id, m.sort_order ASC;";
             return string.Empty;
         }
 
-        if (videos.Any(x => x.DownloadStatus == "pending" || x.DownloadStatus == "downloading"))
+        if (videos.Any(x => x.DownloadStatus is "pending" or "downloading"))
         {
             return "動画をバックグラウンドで保存中";
         }
 
         if (videos.Any(x => x.DownloadStatus == "failed"))
         {
-            return "動画保存に失敗した項目があります";
+            return "動画保存に失敗あり";
         }
 
         return "動画保存済み";
@@ -466,4 +901,6 @@ ORDER BY m.post_id, m.sort_order ASC;";
                 ? QuotedAuthorHandle
                 : $"{QuotedAuthorName} ({QuotedAuthorHandle})";
     }
+
+    private sealed record MovedDirectoryItem(string OriginalPath, string TempPath);
 }
