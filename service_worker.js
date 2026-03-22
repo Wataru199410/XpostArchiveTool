@@ -9,6 +9,7 @@ const MAX_M3U8_PER_TAB = 80;
 const MAX_VIDEO_PLAYLISTS_PER_SAVE = 5;
 const M3U8_MAX_AGE_MS = 10 * 60 * 1000;
 const VIDEO_FALLBACK_WINDOW_MS = 60 * 1000;
+const VIDEO_CAPTURE_MATCH_GRACE_MS = 2000;
 let activeApiBase = API_BASE_CANDIDATES[0];
 
 chrome.webRequest.onBeforeRequest.addListener(
@@ -343,6 +344,8 @@ function selectVideoPlaylistsForTweet(tabId, tweetUrl, tweetIdFromPayload, video
   const seen = new Set();
   const output = [];
   const hasVideo = videoContext?.has_video === true;
+  const captureStartedAt = Number(videoContext?.capture_started_at || 0);
+  const mediaIds = extractVideoMediaIds(videoContext);
 
   for (const candidateUrl of normalizeDirectVideoCandidates(videoContext)) {
     if (seen.has(candidateUrl)) continue;
@@ -368,15 +371,26 @@ function selectVideoPlaylistsForTweet(tabId, tweetUrl, tweetIdFromPayload, video
   });
 
   const filtered = recentItems.filter((item) =>
+    mediaIds.some((mediaId) => (item.m3u8_url || "").includes(`/${mediaId}/`)) ||
     (item.page_url || "").includes(marker) ||
     (item.m3u8_url || "").includes(tweetId)
   );
 
+  const capturedDuringSave = captureStartedAt > 0
+    ? recentItems.filter((item) => (item.captured_at || 0) >= captureStartedAt - VIDEO_CAPTURE_MATCH_GRACE_MS)
+    : [];
+
   const candidates = (filtered.length > 0
     ? filtered
-    : recentItems.filter((item) => now - (item.captured_at || 0) <= VIDEO_FALLBACK_WINDOW_MS))
+    : capturedDuringSave.length > 0
+      ? capturedDuringSave
+      : [])
     .slice()
-    .sort((a, b) => (b.captured_at || 0) - (a.captured_at || 0))
+    .sort((a, b) => {
+      const rankDiff = rankVideoCandidateUrl(a.m3u8_url) - rankVideoCandidateUrl(b.m3u8_url);
+      if (rankDiff !== 0) return rankDiff;
+      return (b.captured_at || 0) - (a.captured_at || 0);
+    })
     .slice(0, MAX_VIDEO_PLAYLISTS_PER_SAVE);
 
   for (const item of candidates) {
@@ -422,6 +436,36 @@ function normalizeDirectVideoCandidates(videoContext) {
   }
 
   return normalized;
+}
+
+function rankVideoCandidateUrl(url) {
+  const value = String(url || "").toLowerCase();
+  if (/(?:\\.mp4|\\.m4v|\\.mov|\\.webm|\\.ts|\\.mkv)(?:\\?|$)/i.test(value) && value.includes("/vid/")) return 0;
+  if (value.includes(".m3u8") && value.includes("/pl/")) return 1;
+  if (/(?:\\.mp4|\\.m4v|\\.mov|\\.webm|\\.ts|\\.mkv)(?:\\?|$)/i.test(value) && value.includes("/aud/")) return 3;
+  if (/(?:\\.mp4|\\.m4v|\\.mov|\\.webm|\\.ts|\\.mkv)(?:\\?|$)/i.test(value)) return 2;
+  return 4;
+}
+
+function extractVideoMediaIds(videoContext) {
+  const values = [
+    ...(Array.isArray(videoContext?.candidate_urls) ? videoContext.candidate_urls : []),
+    ...(Array.isArray(videoContext?.poster_urls) ? videoContext.poster_urls : [])
+  ];
+  const ids = new Set();
+
+  for (const value of values) {
+    const text = String(value || "");
+    const matches = text.match(/(?:amplify_video(?:_thumb)?|ext_tw_video(?:_thumb)?)\/(\d+)/gi) || [];
+    for (const match of matches) {
+      const idMatch = match.match(/\/(\d+)/);
+      if (idMatch?.[1]) {
+        ids.add(idMatch[1]);
+      }
+    }
+  }
+
+  return [...ids];
 }
 
 function extractTweetId(url) {

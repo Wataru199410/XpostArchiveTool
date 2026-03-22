@@ -9,7 +9,10 @@
 
   <ItemGroup>
     <Compile Remove="Program.cs" />
+    <Compile Remove="tools\**\*.cs" />
+    <Compile Remove="tools\**\obj\**\*.cs" />
     <None Remove="schema.sql" />
+    <None Remove="tools\**" />
   </ItemGroup>
 
   <ItemGroup>

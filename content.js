@@ -6,6 +6,11 @@ const MODAL_ID = "x-post-archive-modal";
 const TOAST_ID = "x-post-archive-toast";
 const TAG_LIMIT = 30;
 const TAG_MAX_COUNT = 10;
+const tweetMediaCache = new Map();
+var extractTweetId = function(url) {
+  const match = String(url || "").match(/status\/(\d+)/);
+  return match ? match[1] : "";
+};
 
 let scanScheduled = false;
 const postStatusCache = new Map();
@@ -14,6 +19,7 @@ const postStatusInflight = new Map();
 boot();
 
 function boot() {
+  installApiResponseHooks();
   installStyles();
   scanArticles();
   const observer = new MutationObserver(() => {
@@ -25,6 +31,152 @@ function boot() {
     });
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
+}
+
+function installApiResponseHooks() {
+  if (window.__xPostArchiveApiHookInstalled) return;
+  window.__xPostArchiveApiHookInstalled = true;
+
+  const originalFetch = window.fetch;
+  window.fetch = async (...args) => {
+    const response = await originalFetch(...args);
+    tryProcessApiResponse(args[0], response);
+    return response;
+  };
+
+  const originalOpen = XMLHttpRequest.prototype.open;
+  const originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this.__xPostArchiveUrl = url;
+    return originalOpen.call(this, method, url, ...rest);
+  };
+  XMLHttpRequest.prototype.send = function(...args) {
+    this.addEventListener("load", () => {
+      try {
+        const url = this.__xPostArchiveUrl || "";
+        if (!isInterestingApiUrl(url)) return;
+        const text = this.responseType && this.responseType !== "text" && this.responseType !== "" ? "" : this.responseText;
+        if (!text) return;
+        const json = JSON.parse(text);
+        cacheTweetsFromPayload(json);
+      } catch {
+      }
+    });
+    return originalSend.apply(this, args);
+  };
+}
+
+function tryProcessApiResponse(input, response) {
+  try {
+    const url = typeof input === "string" ? input : input?.url || "";
+    if (!isInterestingApiUrl(url)) return;
+    const clone = response.clone();
+    clone.json().then(cacheTweetsFromPayload).catch(() => {});
+  } catch {
+  }
+}
+
+function isInterestingApiUrl(url) {
+  const value = String(url || "");
+  return value.includes("/TweetDetail")
+    || value.includes("/UserTweets")
+    || value.includes("/HomeTimeline")
+    || value.includes("/SearchTimeline")
+    || value.includes("/Bookmarks")
+    || value.includes("/Likes");
+}
+
+function cacheTweetsFromPayload(payload) {
+  walkTweetObjects(payload, (tweet) => {
+    const normalized = normalizeTweetApiEntry(tweet);
+    if (!normalized?.tweet_id) return;
+    const current = tweetMediaCache.get(normalized.tweet_id) || {};
+    tweetMediaCache.set(normalized.tweet_id, mergeTweetApiEntries(current, normalized));
+  });
+}
+
+function walkTweetObjects(node, onTweet) {
+  if (!node || typeof node !== "object") return;
+
+  if (node.rest_id && (node.legacy || node.core || node.quoted_status_result)) {
+    onTweet(node);
+  }
+
+  for (const value of Object.values(node)) {
+    if (Array.isArray(value)) {
+      for (const item of value) walkTweetObjects(item, onTweet);
+    } else if (value && typeof value === "object") {
+      walkTweetObjects(value, onTweet);
+    }
+  }
+}
+
+function normalizeTweetApiEntry(tweet) {
+  const legacy = tweet?.legacy || {};
+  const coreUser = tweet?.core?.user_results?.result?.legacy || {};
+  const entities = legacy?.extended_entities || legacy?.entities || {};
+  const mediaItems = Array.isArray(entities?.media) ? entities.media : [];
+  const images = [];
+  const videoVariants = [];
+  const posterUrls = [];
+
+  for (const media of mediaItems) {
+    const mediaUrl = media?.media_url_https || media?.media_url || "";
+    const type = String(media?.type || "").toLowerCase();
+    if (type === "photo" && mediaUrl) {
+      images.push({ url: mediaUrl });
+      continue;
+    }
+
+    if ((type === "video" || type === "animated_gif") && mediaUrl) {
+      posterUrls.push(mediaUrl);
+    }
+
+    const variants = Array.isArray(media?.video_info?.variants) ? media.video_info.variants : [];
+    for (const variant of variants) {
+      const variantUrl = String(variant?.url || "").trim();
+      if (!variantUrl) continue;
+      videoVariants.push(variantUrl);
+    }
+  }
+
+  const quotedRaw =
+    tweet?.quoted_status_result?.result?.tweet ||
+    tweet?.quoted_status_result?.result ||
+    null;
+  const quotedTweet = quotedRaw ? normalizeTweetApiEntry(quotedRaw) : null;
+
+  return {
+    tweet_id: String(tweet?.rest_id || ""),
+    url: legacy?.entities?.urls?.[0]?.expanded_url || "",
+    created_at: legacy?.created_at ? new Date(legacy.created_at).toISOString() : "",
+    text: legacy?.full_text || legacy?.text || "",
+    author: {
+      handle: coreUser?.screen_name ? `@${coreUser.screen_name}` : "",
+      name: coreUser?.name || ""
+    },
+    images,
+    video_variants: dedupeStrings(videoVariants),
+    poster_urls: dedupeStrings(posterUrls),
+    quoted_post: quotedTweet
+  };
+}
+
+function mergeTweetApiEntries(current, next) {
+  return {
+    tweet_id: next.tweet_id || current.tweet_id || "",
+    url: next.url || current.url || "",
+    created_at: next.created_at || current.created_at || "",
+    text: next.text || current.text || "",
+    author: {
+      handle: next.author?.handle || current.author?.handle || "",
+      name: next.author?.name || current.author?.name || ""
+    },
+    images: dedupeImageInputs([...(current.images || []), ...(next.images || [])]),
+    video_variants: dedupeStrings([...(current.video_variants || []), ...(next.video_variants || [])]),
+    poster_urls: dedupeStrings([...(current.poster_urls || []), ...(next.poster_urls || [])]),
+    quoted_post: next.quoted_post || current.quoted_post || null
+  };
 }
 
 function installStyles() {
@@ -87,6 +239,7 @@ function bindArticle(article) {
   if (!(article instanceof HTMLElement)) return;
   const tweetId = resolveTweetIdFromArticle(article);
   if (!tweetId) return;
+  if (!shouldBindArticle(article, tweetId)) return;
   if (article.getAttribute(ARTICLE_BOUND_ATTR) === tweetId) return;
   article.setAttribute(ARTICLE_BOUND_ATTR, tweetId);
   article.querySelector(`[${BUTTON_HOST_ATTR}]`)?.remove();
@@ -218,6 +371,22 @@ async function saveOrUpdate(type, payload, button, progressLabel, successTitle, 
   return result.body || {};
 }
 
+function shouldBindArticle(article, tweetId) {
+  const focalTweetId = extractTweetId(location.href);
+  if (!focalTweetId) {
+    return true;
+  }
+
+  if (tweetId !== focalTweetId) {
+    return false;
+  }
+
+  const statusLinks = [...article.querySelectorAll("a[href*='/status/']")]
+    .map((link) => link.getAttribute("href") || "");
+  const uniqueIds = [...new Set(statusLinks.map((href) => href.match(/status\/(\d+)/)?.[1]).filter(Boolean))];
+  return uniqueIds.length === 1 && uniqueIds[0] === focalTweetId;
+}
+
 async function ensureQuotedPostSaved(quotedPayload) {
   const tweetId = quotedPayload?.tweet_id;
   if (!tweetId) {
@@ -275,18 +444,27 @@ function setButtonState(button, label, disabled) {
 async function extractPostData(article) {
   const tweetId = resolveTweetIdFromArticle(article);
   if (!tweetId) throw new Error("tweet_id を取得できませんでした。");
+  const cached = tweetMediaCache.get(tweetId) || null;
   const url = resolveCanonicalUrl(article, tweetId);
-  const createdAt = article.querySelector("time")?.getAttribute("datetime") || "";
+  const createdAt = article.querySelector("time")?.getAttribute("datetime") || cached?.created_at || "";
   if (!createdAt) throw new Error("created_at が見つかりませんでした。");
-  const text = article.querySelector("div[data-testid='tweetText']")?.innerText?.trim() || "";
+  const text = article.querySelector("div[data-testid='tweetText']")?.innerText?.trim() || cached?.text || "";
   const handleEl = article.querySelector(`a[href*="/status/${tweetId}"]`) || article.querySelector("a[href*='/status/']");
-  const handle = resolveHandle(handleEl?.getAttribute("href"));
-  const authorName = article.querySelector("div[dir='ltr'] span")?.textContent?.trim() || handle;
-  const quotedInfo = extractQuotedPostData(article, tweetId);
+  const handle = cached?.author?.handle || resolveHandle(handleEl?.getAttribute("href"));
+  const authorName = article.querySelector("div[dir='ltr'] span")?.textContent?.trim() || cached?.author?.name || handle;
+  const quotedInfo = extractQuotedPostData(article, tweetId, cached);
   const quotedContainer = quotedInfo?.container || null;
-  const imageUrls = extractImageInputs(article, quotedContainer);
-  const videoContext = collectVideoContext(article, quotedContainer);
-  const quotedPost = quotedInfo?.post || null;
+  const imageUrls = dedupeImageInputs([...(cached?.images || []), ...extractImageInputs(article, quotedContainer)]);
+  let videoContext = mergeVideoContexts(collectVideoContext(article, quotedContainer), cached);
+  if (videoContext.has_video) {
+    const captureStartedAt = Date.now();
+    if (!hasUsableVideoCandidate(videoContext)) {
+      await primeVideoForCapture(article, quotedContainer);
+      videoContext = mergeVideoContexts(collectVideoContext(article, quotedContainer), cached);
+    }
+    videoContext.capture_started_at = captureStartedAt;
+  }
+  const quotedPost = quotedInfo?.post || buildQuotedPayloadFromCached(cached?.quoted_post) || null;
   return {
     tweet_id: tweetId,
     url,
@@ -302,7 +480,19 @@ async function extractPostData(article) {
   };
 }
 
-function extractQuotedPostData(article, rootTweetId) {
+function hasUsableVideoCandidate(videoContext) {
+  const values = Array.isArray(videoContext?.candidate_urls) ? videoContext.candidate_urls : [];
+  return values.some((value) => /^https:/i.test(String(value || "").trim()));
+}
+
+function extractQuotedPostData(article, rootTweetId, cachedRoot = null) {
+  if (cachedRoot?.quoted_post?.tweet_id) {
+    return {
+      container: null,
+      post: buildQuotedPayloadFromCached(cachedRoot.quoted_post)
+    };
+  }
+
   const statusLinks = [...article.querySelectorAll("a[href*='/status/']")];
   const quotedLink = statusLinks.find((link) => {
     const href = link.getAttribute("href") || "";
@@ -359,6 +549,107 @@ function extractImageInputs(scope, excludeScope = null) {
     .slice(0, 10);
 }
 
+function dedupeImageInputs(items) {
+  const output = [];
+  const seen = new Set();
+  for (const item of items || []) {
+    const url = String(item?.url || "").trim();
+    if (!url || seen.has(url)) continue;
+    seen.add(url);
+    output.push({ url });
+  }
+  return output.slice(0, 10);
+}
+
+function dedupeStrings(values) {
+  const output = [];
+  const seen = new Set();
+  for (const value of values || []) {
+    const text = String(value || "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    output.push(text);
+  }
+  return output;
+}
+
+function mergeVideoContexts(current, cachedTweet) {
+  const candidateUrls = dedupeStrings([
+    ...(current?.candidate_urls || []),
+    ...(cachedTweet?.video_variants || [])
+  ]);
+  const posterUrls = dedupeStrings([
+    ...(current?.poster_urls || []),
+    ...(cachedTweet?.poster_urls || [])
+  ]);
+  return {
+    has_video: current?.has_video === true || candidateUrls.length > 0 || posterUrls.length > 0,
+    candidate_urls: candidateUrls.slice(0, 8),
+    poster_urls: posterUrls.slice(0, 8)
+  };
+}
+
+function buildQuotedPayloadFromCached(cachedTweet) {
+  if (!cachedTweet?.tweet_id) return null;
+  return {
+    tweet_id: cachedTweet.tweet_id,
+    url: cachedTweet.url || new URL(`/i/status/${cachedTweet.tweet_id}`, location.origin).toString(),
+    author: {
+      handle: cachedTweet.author?.handle || "@unknown",
+      name: cachedTweet.author?.name || cachedTweet.author?.handle || "@unknown"
+    },
+    created_at: cachedTweet.created_at || new Date().toISOString(),
+    text: cachedTweet.text || "",
+    tags: [],
+    note: "",
+    images: dedupeImageInputs(cachedTweet.images || []),
+    video_context: mergeVideoContexts({ has_video: false, candidate_urls: [], poster_urls: [] }, cachedTweet),
+    quoted_tweet_id: null
+  };
+}
+
+async function primeVideoForCapture(scope, excludeScope = null) {
+  const videos = [...scope.querySelectorAll("video")].filter((video) => !excludeScope || !excludeScope.contains(video));
+  const targetVideo = videos[0] || null;
+  const player =
+    targetVideo?.closest("[data-testid='videoPlayer']") ||
+    [...scope.querySelectorAll("[data-testid='videoPlayer']")].find((node) => !excludeScope || !excludeScope.contains(node)) ||
+    targetVideo;
+
+  if (player instanceof HTMLElement) {
+    for (const eventName of ["pointerenter", "mouseenter", "mouseover", "mousemove"]) {
+      player.dispatchEvent(new MouseEvent(eventName, { bubbles: true, cancelable: true, view: window }));
+    }
+  }
+
+  if (targetVideo) {
+    try {
+      targetVideo.muted = true;
+      targetVideo.volume = 0;
+      await targetVideo.play();
+    } catch {
+    }
+  } else if (player instanceof HTMLElement) {
+    try {
+      player.click();
+    } catch {
+    }
+  }
+
+  await wait(8000);
+
+  if (targetVideo) {
+    try {
+      targetVideo.pause();
+    } catch {
+    }
+  }
+}
+
+function wait(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
 function findQuotedContainer(article, quotedLink, quotedTextElement, quotedTimeElement) {
   const anchorNodes = [quotedLink, quotedTextElement, quotedTimeElement].filter(Boolean);
   let container = anchorNodes[0] || quotedLink;
@@ -404,7 +695,9 @@ function findLowestCommonAncestor(a, b, stopNode) {
 
 function collectVideoContext(article, excludeScope = null) {
   const candidateUrls = [];
+  const posterUrls = [];
   const seen = new Set();
+  const seenPoster = new Set();
   const videos = [...article.querySelectorAll("video")].filter((video) => !excludeScope || !excludeScope.contains(video));
 
   const pushCandidate = (value) => {
@@ -414,9 +707,17 @@ function collectVideoContext(article, excludeScope = null) {
     candidateUrls.push(url);
   };
 
+  const pushPoster = (value) => {
+    const url = String(value || "").trim();
+    if (!url || seenPoster.has(url)) return;
+    seenPoster.add(url);
+    posterUrls.push(url);
+  };
+
   for (const video of videos) {
     pushCandidate(video.currentSrc);
     pushCandidate(video.src);
+    pushPoster(video.poster);
     for (const source of video.querySelectorAll("source")) {
       pushCandidate(source.getAttribute("src"));
     }
@@ -429,11 +730,17 @@ function collectVideoContext(article, excludeScope = null) {
 
   return {
     has_video: hasVideo,
-    candidate_urls: candidateUrls.slice(0, 6)
+    candidate_urls: candidateUrls.slice(0, 6),
+    poster_urls: posterUrls.slice(0, 6)
   };
 }
 
 function resolveTweetIdFromArticle(article) {
+  const timeAnchor = article.querySelector("time")?.closest("a[href*='/status/']");
+  const timeHref = timeAnchor?.getAttribute("href") || "";
+  const timeMatch = timeHref.match(/status\/(\d+)/);
+  if (timeMatch) return timeMatch[1];
+
   for (const link of article.querySelectorAll("a[href*='/status/']")) {
     const match = (link.getAttribute("href") || "").match(/status\/(\d+)/);
     if (match) return match[1];

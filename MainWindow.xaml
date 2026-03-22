@@ -10,6 +10,8 @@
         Background="#F3F4F8">
     <Window.Resources>
         <local:FileImageSourceConverter x:Key="FileImageSourceConverter"/>
+        <local:IntToVisibilityConverter x:Key="IntToVisibilityConverter"/>
+        <local:VideoItemStatusVisibilityConverter x:Key="VideoItemStatusVisibilityConverter"/>
         <SolidColorBrush x:Key="Surface" Color="#FFFFFF"/>
         <SolidColorBrush x:Key="MutedSurface" Color="#F8FAFC"/>
         <SolidColorBrush x:Key="Border" Color="#E5E7EB"/>
@@ -318,6 +320,7 @@
                                             <TextBox Text="{Binding SavedAt, Mode=OneWay}" Margin="0,2,0,0" Foreground="{StaticResource TextSub}" FontSize="12" Style="{StaticResource SelectableTextDisplay}"/>
                                             <TextBox Text="{Binding Text, Mode=OneWay}" Margin="0,8,0,0" TextWrapping="Wrap" Foreground="{StaticResource TextMain}" MaxHeight="56" AcceptsReturn="True" Style="{StaticResource SelectableTextDisplay}"/>
                                             <TextBox Text="{Binding Tags, Mode=OneWay}" Margin="0,8,0,0" Foreground="{StaticResource TextSub}" FontSize="12" Style="{StaticResource SelectableTextDisplay}"/>
+                                            <TextBox Text="{Binding VideoStatusText, Mode=OneWay}" Margin="0,6,0,0" Foreground="{StaticResource Primary}" FontSize="12" Visibility="{Binding VideoCount, Converter={StaticResource IntToVisibilityConverter}}" Style="{StaticResource SelectableTextDisplay}"/>
                                             <StackPanel Margin="0,8,0,0" HorizontalAlignment="Left">
                                                 <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
                                                     <Button Content="&#x524A;&#x9664;" Width="64" HorizontalAlignment="Left" Background="#DC2626" Foreground="White" BorderThickness="0" Click="CardDeletePost_Click"/>
@@ -465,6 +468,7 @@
                                                     </Border>
                                                     <StackPanel Grid.Column="1" Margin="12,0,0,0">
                                                         <TextBox Text="{Binding Display, Mode=OneWay}" FontWeight="SemiBold" Foreground="{StaticResource TextMain}" Style="{StaticResource SelectableTextDisplay}"/>
+                                                        <TextBox Text="{Binding StatusText, Mode=OneWay}" Margin="0,4,0,0" Foreground="{StaticResource Primary}" FontSize="12" Visibility="{Binding Type, Converter={StaticResource VideoItemStatusVisibilityConverter}}" Style="{StaticResource SelectableTextDisplay}"/>
                                                         <TextBox Text="{Binding FullPath, Mode=OneWay}" Margin="0,6,0,0" TextWrapping="Wrap" Foreground="{StaticResource TextSub}" FontSize="12" AcceptsReturn="True" Style="{StaticResource SelectableTextDisplay}"/>
                                                         <Button Content="&#x958B;&#x304F;"
                                                                 Width="72"

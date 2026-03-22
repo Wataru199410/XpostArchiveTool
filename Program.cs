@@ -17,7 +17,6 @@ await Db.InitializeAsync(appConfig.DatabasePath, Path.Combine(AppContext.BaseDir
 builder.Services.AddSingleton(appConfig);
 builder.Services.AddHttpClient();
 builder.Services.AddSingleton<VideoDownloadQueue>();
-builder.Services.AddHostedService<VideoDownloadWorker>();
 var app = builder.Build();
 await Db.MarkIncompleteVideoDownloadsInterruptedAsync(appConfig.DatabasePath, CancellationToken.None);
 
@@ -148,7 +147,7 @@ app.MapPost("/api/v1/posts", async (SavePostRequest request, IHttpClientFactory 
         return Results.BadRequest(ApiError.BadRequest("SAVE_FAILED", ex.ToString()));
     }
 });
-app.MapPut("/api/v1/posts/{tweetId}", async (string tweetId, UpdatePostRequest request, CancellationToken ct) =>
+app.MapPut("/api/v1/posts/{tweetId}", async (string tweetId, UpdatePostRequest request, VideoDownloadQueue videoQueue, CancellationToken ct) =>
 {
     if (!string.Equals(tweetId, request.tweet_id, StringComparison.Ordinal))
         return Results.BadRequest(ApiError.BadRequest("TWEET_ID_MISMATCH", "URL の tweet_id と本文の tweet_id が一致しません。"));
@@ -164,6 +163,10 @@ app.MapPut("/api/v1/posts/{tweetId}", async (string tweetId, UpdatePostRequest r
     try
     {
         var tags = request.tags.Select(TagUtil.Normalize).Where(x => !string.IsNullOrWhiteSpace(x)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        var videos = request.video_playlists
+            .Where(x => !string.IsNullOrWhiteSpace(x.m3u8_url))
+            .Select((x, index) => new MediaRow("video", x.m3u8_url, Path.Combine("videos", $"{(index + 1):000}.{Video.GetPreferredExtension(x.m3u8_url)}").Replace('\\', '/'), index))
+            .ToList();
         await using var tx = (SqliteTransaction)await conn.BeginTransactionAsync(ct);
         var authorId = await Db.UpsertAuthorAsync(conn, tx, request.author.handle, request.author.name, DateTimeOffset.Now, ct);
         var quotedPostId = await Db.ResolveQuotedPostIdAsync(conn, tx, request.quoted_tweet_id, ct);
@@ -173,8 +176,30 @@ app.MapPut("/api/v1/posts/{tweetId}", async (string tweetId, UpdatePostRequest r
         }
         await Db.UpdatePostAsync(conn, tx, existing.id, request.url, authorId, quotedPostId, createdAt, request.text ?? string.Empty, request.note, ct);
         await Db.ReplacePostTagsAsync(conn, tx, existing.id, tags, DateTimeOffset.Now, ct);
+        var videoJobs = new List<VideoDownloadJob>();
+        foreach (var media in videos)
+        {
+            var fullPath = Path.Combine(existing.dir_path, media.local_path);
+            if (File.Exists(fullPath) && Video.IsUsableSavedVideoFile(fullPath))
+            {
+                continue;
+            }
+
+            if (File.Exists(fullPath))
+            {
+                File.Delete(fullPath);
+            }
+
+            var mediaId = await Db.InsertMediaAsync(conn, tx, existing.id, media, "pending", null, ct);
+            videoJobs.Add(new VideoDownloadJob(mediaId, media.original_url ?? string.Empty, fullPath, appConfig.VideoRetryCount));
+        }
         await tx.CommitAsync(ct);
-        return Results.Ok(new { ok = true, updated = true, tweet_id = request.tweet_id, dir_path = existing.dir_path });
+        foreach (var job in videoJobs)
+        {
+            videoQueue.Enqueue(job);
+        }
+
+        return Results.Ok(new { ok = true, updated = true, tweet_id = request.tweet_id, dir_path = existing.dir_path, background_video_count = videoJobs.Count });
     }
     catch (Exception ex)
     {
@@ -258,15 +283,16 @@ sealed record SavePostRequest(string tweet_id, string url, Author author, string
 {
     public SavePostRequest() : this("", "", new Author("", ""), "", "", [], null, [], [], null) { }
 }
-sealed record UpdatePostRequest(string tweet_id, string url, Author author, string created_at, string text, List<string> tags, string? note, string? quoted_tweet_id)
+sealed record UpdatePostRequest(string tweet_id, string url, Author author, string created_at, string text, List<string> tags, string? note, List<VideoPlaylistInput> video_playlists, string? quoted_tweet_id)
 {
-    public UpdatePostRequest() : this("", "", new Author("", ""), "", "", [], null, null) { }
+    public UpdatePostRequest() : this("", "", new Author("", ""), "", "", [], null, [], null) { }
 }
 sealed record Author(string handle, string name);
 sealed record ImageInput(string url);
 sealed record VideoPlaylistInput(string m3u8_url);
 sealed record MediaRow(string media_type, string? original_url, string local_path, int sort_order);
 sealed record VideoDownloadJob(long media_id, string source_url, string full_path, int retry_count);
+sealed record LocalHlsInput(string VideoPlaylistPath, string? AudioPlaylistPath);
 sealed record TagCatalogResponseItem(string name, int count);
 sealed record QuotedPostSummary(string tweet_id, string author_handle, string author_name, string text);
 sealed record ExistingPostResponse(long id, string tweet_id, string url, string created_at, string text, string? note, string saved_at, string dir_path, Author author, List<string> tags, QuotedPostSummary? quoted_post);
@@ -343,17 +369,29 @@ static class TagUtil
 static class Video
 {
     private static readonly string[] DirectVideoExtensions = ["mp4", "m4v", "mov", "webm", "ts", "mkv"];
+    private static readonly UTF8Encoding Utf8NoBom = new(false);
+    private const long MinVideoFileSizeBytes = 32 * 1024;
 
     public static async Task<(bool Ok, string ErrorMessage)> DownloadAsync(HttpClient httpClient, string ffmpegPath, string sourceUrl, string outPath, int retryCount, CancellationToken ct)
     {
+        if (IsHlsPlaylistUrl(sourceUrl))
+        {
+            DeleteIfExists(outPath);
+            return await DownloadHlsLocallyAsync(httpClient, ffmpegPath, sourceUrl, outPath, ct);
+        }
+
         if (IsLikelyDirectVideoUrl(sourceUrl))
         {
             try
             {
                 await DownloadDirectAsync(httpClient, sourceUrl, outPath, ct);
-                return File.Exists(outPath)
-                    ? (true, string.Empty)
-                    : (false, "動画ファイルの保存に失敗しました。");
+                if (!File.Exists(outPath))
+                {
+                    return (false, "動画ファイルの保存に失敗しました。");
+                }
+
+                var validate = await ValidateSavedVideoAsync(ffmpegPath, outPath, ct);
+                return validate.Ok ? (true, string.Empty) : validate;
             }
             catch (Exception ex)
             {
@@ -363,19 +401,68 @@ static class Video
 
         for (var attempt = 0; attempt <= retryCount; attempt++)
         {
-            var psi = new ProcessStartInfo { FileName = ffmpegPath, Arguments = $"-y -i \"{sourceUrl}\" -c copy \"{outPath}\"", RedirectStandardError = true, RedirectStandardOutput = true, UseShellExecute = false, CreateNoWindow = true };
+            var args = $"-nostdin -v error -y -i \"{sourceUrl}\" -map 0:v:0 -map 0:a? -c copy -movflags +faststart";
+            if (string.Equals(Path.GetExtension(outPath), ".mp4", StringComparison.OrdinalIgnoreCase))
+            {
+                args += " -bsf:a aac_adtstoasc";
+            }
+
+            args += $" \"{outPath}\"";
+            var psi = new ProcessStartInfo { FileName = ffmpegPath, Arguments = args, RedirectStandardError = true, RedirectStandardOutput = false, UseShellExecute = false, CreateNoWindow = true };
             try
             {
                 using var process = Process.Start(psi);
                 if (process is null) return (false, "ffmpeg の起動に失敗しました。");
                 await process.WaitForExitAsync(ct);
                 var stderr = await process.StandardError.ReadToEndAsync();
-                if (process.ExitCode == 0 && File.Exists(outPath)) return (true, string.Empty);
-                if (attempt == retryCount) return (false, $"ffmpeg exit code={process.ExitCode}\n{stderr}");
+                if (process.ExitCode == 0 && File.Exists(outPath))
+                {
+                    var validate = await ValidateSavedVideoAsync(ffmpegPath, outPath, ct);
+                    if (validate.Ok)
+                    {
+                        return (true, string.Empty);
+                    }
+
+                    if (attempt == retryCount)
+                    {
+                        return validate;
+                    }
+                }
+                if (attempt == retryCount)
+                {
+                    if (IsHlsPlaylistUrl(sourceUrl))
+                    {
+                        DeleteIfExists(outPath);
+                        var localFallback = await DownloadHlsLocallyAsync(httpClient, ffmpegPath, sourceUrl, outPath, ct);
+                        if (localFallback.Ok)
+                        {
+                            return localFallback;
+                        }
+
+                        return (false, $"ffmpeg exit code={process.ExitCode}\n{stderr}\n{localFallback.ErrorMessage}");
+                    }
+
+                    return (false, $"ffmpeg exit code={process.ExitCode}\n{stderr}");
+                }
             }
             catch (Exception ex)
             {
-                if (attempt == retryCount) return (false, ex.ToString());
+                if (attempt == retryCount)
+                {
+                    if (IsHlsPlaylistUrl(sourceUrl))
+                    {
+                        DeleteIfExists(outPath);
+                        var localFallback = await DownloadHlsLocallyAsync(httpClient, ffmpegPath, sourceUrl, outPath, ct);
+                        if (localFallback.Ok)
+                        {
+                            return localFallback;
+                        }
+
+                        return (false, $"{ex}\n{localFallback.ErrorMessage}");
+                    }
+
+                    return (false, ex.ToString());
+                }
             }
         }
         return (false, "動画保存に失敗しました。");
@@ -391,6 +478,18 @@ static class Video
         return DirectVideoExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase) ? extension : "mp4";
     }
 
+    public static bool IsUsableSavedVideoFile(string path)
+    {
+        try
+        {
+            return File.Exists(path) && new FileInfo(path).Length >= 32 * 1024;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
     private static bool IsLikelyDirectVideoUrl(string sourceUrl)
     {
         if (string.IsNullOrWhiteSpace(sourceUrl))
@@ -403,10 +502,262 @@ static class Video
         {
             return true;
         }
+        return false;
+    }
 
-        return !sourceUrl.Contains(".m3u8", StringComparison.OrdinalIgnoreCase)
-            && (sourceUrl.Contains("/ext_tw_video/", StringComparison.OrdinalIgnoreCase)
-                || sourceUrl.Contains("/amplify_video/", StringComparison.OrdinalIgnoreCase));
+    private static bool IsHlsPlaylistUrl(string sourceUrl)
+    {
+        return !string.IsNullOrWhiteSpace(sourceUrl)
+            && sourceUrl.Contains(".m3u8", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<(bool Ok, string ErrorMessage)> DownloadHlsLocallyAsync(HttpClient httpClient, string ffmpegPath, string sourceUrl, string outPath, CancellationToken ct)
+    {
+        var workDir = Path.Combine(Path.GetTempPath(), $"xpost-hls-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(workDir);
+        try
+        {
+            Console.WriteLine($"VIDEO_HLS_LOCAL_START source={sourceUrl} workdir={workDir}");
+            var localInput = await PrepareLocalHlsInputAsync(httpClient, sourceUrl, workDir, ct);
+            Console.WriteLine($"VIDEO_HLS_LOCAL_INPUT source={sourceUrl} videoInput={localInput.VideoPlaylistPath} audioInput={localInput.AudioPlaylistPath ?? "(none)"}");
+            var args = BuildFfmpegArgs(localInput, outPath);
+            var psi = new ProcessStartInfo
+            {
+                FileName = ffmpegPath,
+                Arguments = args,
+                RedirectStandardError = true,
+                RedirectStandardOutput = false,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(psi);
+            if (process is null)
+            {
+                return (false, "ffmpeg local remux start failed.");
+            }
+
+            await process.WaitForExitAsync(ct);
+            var stderr = await process.StandardError.ReadToEndAsync();
+            if (process.ExitCode != 0 || !File.Exists(outPath))
+            {
+                Console.WriteLine($"VIDEO_HLS_LOCAL_FFMPEG_FAILED code={process.ExitCode} stderr={stderr}");
+                return (false, $"local hls ffmpeg exit code={process.ExitCode}\n{stderr}");
+            }
+
+            return await ValidateSavedVideoAsync(ffmpegPath, outPath, ct);
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"VIDEO_HLS_LOCAL_EXCEPTION source={sourceUrl} error={ex}");
+            return (false, ex.ToString());
+        }
+        finally
+        {
+            DeleteDirectoryIfExists(workDir);
+        }
+    }
+
+    private static async Task<LocalHlsInput> PrepareLocalHlsInputAsync(HttpClient httpClient, string sourceUrl, string workDir, CancellationToken ct)
+    {
+        var masterText = await httpClient.GetStringAsync(sourceUrl, ct);
+        if (!masterText.Contains("#EXT-X-STREAM-INF", StringComparison.OrdinalIgnoreCase))
+        {
+            return new LocalHlsInput(await DownloadMediaPlaylistAsync(httpClient, new Uri(sourceUrl), workDir, "video", ct), null);
+        }
+
+        var master = ParseMasterPlaylist(masterText);
+        if (master.Streams.Count == 0)
+        {
+            return new LocalHlsInput(await DownloadMediaPlaylistAsync(httpClient, new Uri(sourceUrl), workDir, "video", ct), null);
+        }
+
+        var selectedStream = master.Streams
+            .OrderByDescending(x => x.Bandwidth)
+            .ThenByDescending(x => x.Uri.Contains("/avc1/", StringComparison.OrdinalIgnoreCase))
+            .First();
+
+        var videoPlaylistPath = await DownloadMediaPlaylistAsync(httpClient, ResolveUri(sourceUrl, selectedStream.Uri), workDir, "video", ct);
+        if (string.IsNullOrWhiteSpace(selectedStream.AudioGroupId) || !master.AudioByGroupId.TryGetValue(selectedStream.AudioGroupId, out var audioUri))
+        {
+            return new LocalHlsInput(videoPlaylistPath, null);
+        }
+
+        var audioPlaylistPath = await DownloadMediaPlaylistAsync(httpClient, ResolveUri(sourceUrl, audioUri), workDir, "audio", ct);
+        return new LocalHlsInput(videoPlaylistPath, audioPlaylistPath);
+    }
+
+    private static async Task<string> DownloadMediaPlaylistAsync(HttpClient httpClient, Uri playlistUri, string workDir, string prefix, CancellationToken ct)
+    {
+        var playlistText = await httpClient.GetStringAsync(playlistUri, ct);
+        var lines = playlistText.Replace("\r\n", "\n").Split('\n');
+        var rewritten = new List<string>(lines.Length);
+        var index = 0;
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.Trim();
+            if (line.StartsWith("#EXT-X-MAP", StringComparison.OrdinalIgnoreCase) || line.StartsWith("#EXT-X-KEY", StringComparison.OrdinalIgnoreCase))
+            {
+                var rewrittenTag = await RewriteTagUriAsync(httpClient, playlistUri, workDir, prefix, line, index, ct);
+                rewritten.Add(rewrittenTag.Line);
+                index = rewrittenTag.NextIndex;
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(line) || line.StartsWith("#", StringComparison.Ordinal))
+            {
+                rewritten.Add(rawLine);
+                continue;
+            }
+
+            var localName = await DownloadPlaylistAssetAsync(httpClient, ResolveUri(playlistUri, line), workDir, prefix, index++, ct);
+            rewritten.Add(localName);
+        }
+
+        var playlistPath = Path.Combine(workDir, $"{prefix}.m3u8");
+        await File.WriteAllTextAsync(playlistPath, string.Join("\n", rewritten), Utf8NoBom, ct);
+        return playlistPath;
+    }
+
+    private static async Task<(string Line, int NextIndex)> RewriteTagUriAsync(HttpClient httpClient, Uri playlistUri, string workDir, string prefix, string line, int index, CancellationToken ct)
+    {
+        var match = Regex.Match(line, "URI=\"(?<uri>[^\"]+)\"", RegexOptions.IgnoreCase);
+        if (!match.Success)
+        {
+            return (line, index);
+        }
+
+        var originalUri = match.Groups["uri"].Value;
+        var localName = await DownloadPlaylistAssetAsync(httpClient, ResolveUri(playlistUri, originalUri), workDir, prefix, index, ct);
+        return (line.Replace(originalUri, localName, StringComparison.Ordinal), index + 1);
+    }
+
+    private static async Task<string> DownloadPlaylistAssetAsync(HttpClient httpClient, Uri absoluteUri, string workDir, string prefix, int index, CancellationToken ct)
+    {
+        var extension = Path.GetExtension(absoluteUri.AbsolutePath);
+        if (string.IsNullOrWhiteSpace(extension) || extension.Length > 8)
+        {
+            extension = ".bin";
+        }
+
+        var localName = $"{prefix}-{index:0000}{extension}";
+        var localPath = Path.Combine(workDir, localName);
+        using var response = await httpClient.GetAsync(absoluteUri, HttpCompletionOption.ResponseHeadersRead, ct);
+        response.EnsureSuccessStatusCode();
+        await using var input = await response.Content.ReadAsStreamAsync(ct);
+        await using var output = new FileStream(localPath, FileMode.Create, FileAccess.Write, FileShare.None);
+        await input.CopyToAsync(output, ct);
+        return localName;
+    }
+
+    private static MasterPlaylist ParseMasterPlaylist(string text)
+    {
+        var audioByGroupId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var streams = new List<MasterStream>();
+        string? pendingStream = null;
+
+        foreach (var rawLine in text.Replace("\r\n", "\n").Split('\n'))
+        {
+            var line = rawLine.Trim();
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                continue;
+            }
+
+            if (line.StartsWith("#EXT-X-MEDIA", StringComparison.OrdinalIgnoreCase))
+            {
+                var attrs = ParseAttributes(line);
+                if (attrs.TryGetValue("TYPE", out var type)
+                    && type.Equals("AUDIO", StringComparison.OrdinalIgnoreCase)
+                    && attrs.TryGetValue("GROUP-ID", out var groupId)
+                    && attrs.TryGetValue("URI", out var uri))
+                {
+                    audioByGroupId[groupId] = uri;
+                }
+                continue;
+            }
+
+            if (line.StartsWith("#EXT-X-STREAM-INF", StringComparison.OrdinalIgnoreCase))
+            {
+                pendingStream = line;
+                continue;
+            }
+
+            if (pendingStream is not null && !line.StartsWith("#", StringComparison.Ordinal))
+            {
+                var attrs = ParseAttributes(pendingStream);
+                var bandwidth = attrs.TryGetValue("BANDWIDTH", out var bandwidthText) && int.TryParse(bandwidthText, out var parsedBandwidth)
+                    ? parsedBandwidth
+                    : 0;
+                attrs.TryGetValue("AUDIO", out var audioGroupId);
+                attrs.TryGetValue("RESOLUTION", out var resolution);
+                attrs.TryGetValue("CODECS", out var codecs);
+                streams.Add(new MasterStream(line, bandwidth, audioGroupId, resolution, codecs));
+                pendingStream = null;
+            }
+        }
+
+        return new MasterPlaylist(audioByGroupId, streams);
+    }
+
+    private static Dictionary<string, string> ParseAttributes(string line)
+    {
+        var separator = line.IndexOf(':');
+        var text = separator >= 0 ? line[(separator + 1)..] : line;
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (Match match in Regex.Matches(text, "(?<key>[A-Z0-9-]+)=(?<value>\"[^\"]*\"|[^,]+)"))
+        {
+            if (!match.Success) continue;
+            var key = match.Groups["key"].Value;
+            var value = match.Groups["value"].Value.Trim();
+            if (value.Length >= 2 && value.StartsWith("\"", StringComparison.Ordinal) && value.EndsWith("\"", StringComparison.Ordinal))
+            {
+                value = value[1..^1];
+            }
+            result[key] = value;
+        }
+        return result;
+    }
+
+    private static string BuildFfmpegArgs(LocalHlsInput input, string outPath)
+    {
+        var args = $"-nostdin -v error -y -f hls -allowed_extensions ALL -protocol_whitelist file,http,https,tcp,tls,crypto,data -i \"{input.VideoPlaylistPath}\"";
+        if (!string.IsNullOrWhiteSpace(input.AudioPlaylistPath))
+        {
+            args += $" -f hls -allowed_extensions ALL -protocol_whitelist file,http,https,tcp,tls,crypto,data -i \"{input.AudioPlaylistPath}\"";
+        }
+
+        args += " -map 0:v:0";
+        if (!string.IsNullOrWhiteSpace(input.AudioPlaylistPath))
+        {
+            args += " -map 1:a:0";
+        }
+        else
+        {
+            args += " -map 0:a?";
+        }
+
+        args += " -c copy -movflags +faststart";
+        if (string.Equals(Path.GetExtension(outPath), ".mp4", StringComparison.OrdinalIgnoreCase))
+        {
+            args += " -bsf:a aac_adtstoasc";
+        }
+
+        args += $" \"{outPath}\"";
+        return args;
+    }
+
+    private static Uri ResolveUri(string baseUri, string relativeOrAbsolute)
+    {
+        return ResolveUri(new Uri(baseUri), relativeOrAbsolute);
+    }
+
+    private static Uri ResolveUri(Uri baseUri, string relativeOrAbsolute)
+    {
+        return Uri.TryCreate(relativeOrAbsolute, UriKind.Absolute, out var absolute)
+            ? absolute
+            : new Uri(baseUri, relativeOrAbsolute);
     }
 
     private static async Task DownloadDirectAsync(HttpClient httpClient, string sourceUrl, string outPath, CancellationToken ct)
@@ -416,7 +767,7 @@ static class Video
         res.EnsureSuccessStatusCode();
         var contentType = res.Content.Headers.ContentType?.MediaType ?? string.Empty;
         if (!contentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
-            && !contentType.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase))
+            || contentType.Equals("application/octet-stream", StringComparison.OrdinalIgnoreCase))
         {
             throw new InvalidOperationException($"動画ではないレスポンスが返されました: {contentType}");
         }
@@ -425,6 +776,76 @@ static class Video
         await using var stream = await res.Content.ReadAsStreamAsync(ct);
         await stream.CopyToAsync(fs, ct);
     }
+
+    private static async Task<(bool Ok, string ErrorMessage)> ValidateSavedVideoAsync(string ffmpegPath, string outPath, CancellationToken ct)
+    {
+        var fileInfo = new FileInfo(outPath);
+        if (!fileInfo.Exists)
+        {
+            return (false, "動画ファイルが作成されませんでした。");
+        }
+
+        if (fileInfo.Length < MinVideoFileSizeBytes)
+        {
+            return (false, $"動画ファイルが小さすぎます: {fileInfo.Length} bytes");
+        }
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = ffmpegPath,
+            Arguments = $"-v error -i \"{outPath}\" -f null -",
+            RedirectStandardError = true,
+            RedirectStandardOutput = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(psi);
+        if (process is null)
+        {
+            return (false, "ffmpeg による動画検証を開始できませんでした。");
+        }
+
+        await process.WaitForExitAsync(ct);
+        var stderr = await process.StandardError.ReadToEndAsync();
+        if (process.ExitCode != 0)
+        {
+            return (false, $"動画検証に失敗しました。\n{stderr}");
+        }
+
+        return (true, string.Empty);
+    }
+
+    private static void DeleteIfExists(string path)
+    {
+        try
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private static void DeleteDirectoryIfExists(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                Directory.Delete(path, true);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private sealed record MasterPlaylist(Dictionary<string, string> AudioByGroupId, List<MasterStream> Streams);
+    private sealed record MasterStream(string Uri, int Bandwidth, string? AudioGroupId, string? Resolution, string? Codecs);
 }
 static class Db
 {
@@ -509,6 +930,25 @@ static class Db
         cmd.Parameters.AddWithValue("$download_error", (object?)downloadError ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$sort_order", media.sort_order);
         return (long)(await cmd.ExecuteScalarAsync(ct) ?? 0L);
+    }
+
+    public static async Task<HashSet<string>> LoadMediaOriginalUrlsAsync(SqliteConnection conn, SqliteTransaction tx, long postId, string mediaType, CancellationToken ct)
+    {
+        await using var cmd = conn.CreateCommand();
+        cmd.Transaction = tx;
+        cmd.CommandText = "SELECT original_url FROM media WHERE post_id = $post_id AND media_type = $media_type AND original_url IS NOT NULL;";
+        cmd.Parameters.AddWithValue("$post_id", postId);
+        cmd.Parameters.AddWithValue("$media_type", mediaType);
+        var urls = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var reader = await cmd.ExecuteReaderAsync(ct);
+        while (await reader.ReadAsync(ct))
+        {
+            if (!reader.IsDBNull(0))
+            {
+                urls.Add(reader.GetString(0));
+            }
+        }
+        return urls;
     }
 
     public static async Task UpdateMediaDownloadStateAsync(string dbPath, long mediaId, string downloadStatus, string? downloadError, CancellationToken ct)
@@ -707,10 +1147,85 @@ LIMIT 1;";
 sealed class VideoDownloadQueue
 {
     private readonly Channel<VideoDownloadJob> _channel = Channel.CreateUnbounded<VideoDownloadJob>();
+    private readonly IHttpClientFactory _httpClientFactory;
+    private readonly AppConfig _appConfig;
+    private int _isPumpRunning;
 
-    public void Enqueue(VideoDownloadJob job) => _channel.Writer.TryWrite(job);
+    public VideoDownloadQueue(IHttpClientFactory httpClientFactory, AppConfig appConfig)
+    {
+        _httpClientFactory = httpClientFactory;
+        _appConfig = appConfig;
+    }
+
+    public void Enqueue(VideoDownloadJob job)
+    {
+        _channel.Writer.TryWrite(job);
+        StartPumpIfNeeded();
+    }
 
     public IAsyncEnumerable<VideoDownloadJob> ReadAllAsync(CancellationToken ct) => _channel.Reader.ReadAllAsync(ct);
+
+    private void StartPumpIfNeeded()
+    {
+        if (Interlocked.CompareExchange(ref _isPumpRunning, 1, 0) != 0)
+        {
+            return;
+        }
+
+        _ = Task.Run(ProcessQueueAsync);
+    }
+
+    private async Task ProcessQueueAsync()
+    {
+        try
+        {
+            while (await _channel.Reader.WaitToReadAsync())
+            {
+                while (_channel.Reader.TryRead(out var job))
+                {
+                    try
+                    {
+                        await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "downloading", null, CancellationToken.None);
+                        var client = _httpClientFactory.CreateClient();
+                        client.DefaultRequestHeaders.UserAgent.ParseAdd("XPostArchive/1.0");
+                        Console.WriteLine($"VIDEO_JOB_START media_id={job.media_id} source={job.source_url} path={job.full_path}");
+                        var result = await Video.DownloadAsync(client, _appConfig.FfmpegPath, job.source_url, job.full_path, job.retry_count, CancellationToken.None);
+                        if (result.Ok)
+                        {
+                            Console.WriteLine($"VIDEO_JOB_OK media_id={job.media_id} path={job.full_path}");
+                            await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "completed", null, CancellationToken.None);
+                        }
+                        else
+                        {
+                            Console.WriteLine($"VIDEO_JOB_FAILED media_id={job.media_id} error={result.ErrorMessage}");
+                            VideoDownloadWorker.DeletePartialFile(job.full_path);
+                            await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "failed", result.ErrorMessage, CancellationToken.None);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"VIDEO_JOB_EXCEPTION media_id={job.media_id} error={ex}");
+                        VideoDownloadWorker.DeletePartialFile(job.full_path);
+                        try
+                        {
+                            await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "failed", ex.Message, CancellationToken.None);
+                        }
+                        catch
+                        {
+                        }
+                    }
+                }
+            }
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _isPumpRunning, 0);
+            if (_channel.Reader.Count > 0)
+            {
+                StartPumpIfNeeded();
+            }
+        }
+    }
 }
 
 sealed class VideoDownloadWorker : BackgroundService
@@ -735,19 +1250,23 @@ sealed class VideoDownloadWorker : BackgroundService
                 await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "downloading", null, stoppingToken);
                 var client = _httpClientFactory.CreateClient();
                 client.DefaultRequestHeaders.UserAgent.ParseAdd("XPostArchive/1.0");
+                Console.WriteLine($"VIDEO_JOB_START media_id={job.media_id} source={job.source_url} path={job.full_path}");
                 var result = await Video.DownloadAsync(client, _appConfig.FfmpegPath, job.source_url, job.full_path, job.retry_count, stoppingToken);
                 if (result.Ok)
                 {
+                    Console.WriteLine($"VIDEO_JOB_OK media_id={job.media_id} path={job.full_path}");
                     await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "completed", null, stoppingToken);
                 }
                 else
                 {
+                    Console.WriteLine($"VIDEO_JOB_FAILED media_id={job.media_id} error={result.ErrorMessage}");
                     DeletePartialFile(job.full_path);
                     await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "failed", result.ErrorMessage, stoppingToken);
                 }
             }
             catch (OperationCanceledException)
             {
+                Console.WriteLine($"VIDEO_JOB_CANCELLED media_id={job.media_id} path={job.full_path}");
                 DeletePartialFile(job.full_path);
                 try
                 {
@@ -760,6 +1279,7 @@ sealed class VideoDownloadWorker : BackgroundService
             }
             catch (Exception ex)
             {
+                Console.WriteLine($"VIDEO_JOB_EXCEPTION media_id={job.media_id} error={ex}");
                 DeletePartialFile(job.full_path);
                 try
                 {
@@ -772,7 +1292,7 @@ sealed class VideoDownloadWorker : BackgroundService
         }
     }
 
-    private static void DeletePartialFile(string path)
+    internal static void DeletePartialFile(string path)
     {
         try
         {
