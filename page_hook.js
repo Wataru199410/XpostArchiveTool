@@ -1,5 +1,6 @@
 (() => {
   const EVENT_NAME = "__x_post_archive_api_payload__";
+  const MESSAGE_TYPE = "__x_post_archive_api_payload__";
   if (window.__xPostArchivePageHookInstalled) return;
   window.__xPostArchivePageHookInstalled = true;
 
@@ -53,6 +54,10 @@
   function dispatchPayload(payload) {
     try {
       window.dispatchEvent(new CustomEvent(EVENT_NAME, { detail: payload }));
+    } catch {
+    }
+    try {
+      window.postMessage({ type: MESSAGE_TYPE, payload }, location.origin);
     } catch {
     }
   }

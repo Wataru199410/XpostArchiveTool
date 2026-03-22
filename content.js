@@ -45,11 +45,21 @@ function installApiResponseHooks() {
     }
   });
 
+  window.addEventListener("message", (event) => {
+    if (event.source !== window) return;
+    if (event.origin !== location.origin) return;
+    if (event.data?.type !== API_PAYLOAD_EVENT) return;
+    try {
+      cacheTweetsFromPayload(event.data.payload);
+    } catch {
+    }
+  });
+
   const script = document.createElement("script");
   script.src = chrome.runtime.getURL("page_hook.js");
   script.async = false;
   script.onload = () => script.remove();
-  (document.head || document.documentElement).appendChild(script);
+  (document.documentElement || document.head).appendChild(script);
 
   const originalFetch = window.fetch;
   window.fetch = async (...args) => {
@@ -112,8 +122,9 @@ function cacheTweetsFromPayload(payload) {
 function walkTweetObjects(node, onTweet) {
   if (!node || typeof node !== "object") return;
 
-  if (node.rest_id && (node.legacy || node.core || node.quoted_status_result)) {
-    onTweet(node);
+  const cacheableTweet = getCacheableTweetNode(node);
+  if (cacheableTweet && (cacheableTweet.legacy || cacheableTweet.core || cacheableTweet.quoted_status_result)) {
+    onTweet(cacheableTweet);
   }
 
   for (const value of Object.values(node)) {
@@ -125,9 +136,30 @@ function walkTweetObjects(node, onTweet) {
   }
 }
 
+function getCacheableTweetNode(node) {
+  const direct = node?.rest_id ? node : null;
+  const nested =
+    node?.tweet?.rest_id ? node.tweet :
+    node?.result?.tweet?.rest_id ? node.result.tweet :
+    node?.tweet_results?.result?.rest_id ? node.tweet_results.result :
+    node?.tweet_results?.result?.tweet?.rest_id ? node.tweet_results.result.tweet :
+    null;
+  const base = direct || nested;
+  if (!base) return null;
+  if (node?.quoted_status_result && !base.quoted_status_result) {
+    return { ...base, quoted_status_result: node.quoted_status_result };
+  }
+  return base;
+}
+
 function normalizeTweetApiEntry(tweet) {
   const legacy = tweet?.legacy || {};
   const coreUser = tweet?.core?.user_results?.result?.legacy || {};
+  const tweetId = String(tweet?.rest_id || "");
+  const handle = coreUser?.screen_name ? `@${coreUser.screen_name}` : "";
+  const canonicalUrl = coreUser?.screen_name && tweetId
+    ? new URL(`/${coreUser.screen_name}/status/${tweetId}`, location.origin).toString()
+    : "";
   const entities = legacy?.extended_entities || legacy?.entities || {};
   const mediaItems = Array.isArray(entities?.media) ? entities.media : [];
   const images = [];
@@ -161,12 +193,12 @@ function normalizeTweetApiEntry(tweet) {
   const quotedTweet = quotedRaw ? normalizeTweetApiEntry(quotedRaw) : null;
 
   return {
-    tweet_id: String(tweet?.rest_id || ""),
-    url: legacy?.entities?.urls?.[0]?.expanded_url || "",
+    tweet_id: tweetId,
+    url: canonicalUrl,
     created_at: legacy?.created_at ? new Date(legacy.created_at).toISOString() : "",
     text: legacy?.full_text || legacy?.text || "",
     author: {
-      handle: coreUser?.screen_name ? `@${coreUser.screen_name}` : "",
+      handle,
       name: coreUser?.name || ""
     },
     images,
@@ -456,7 +488,7 @@ async function extractPostData(article) {
   const createdAt = article.querySelector("time")?.getAttribute("datetime") || cached?.created_at || "";
   if (!createdAt) throw new Error("created_at が見つかりませんでした。");
   const text = article.querySelector("div[data-testid='tweetText']")?.innerText?.trim() || cached?.text || "";
-  const handleEl = article.querySelector(`a[href*="/status/${tweetId}"]`) || article.querySelector("a[href*='/status/']");
+  const handleEl = findExactStatusLink(article, tweetId) || article.querySelector("a[href*='/status/']");
   const handle = cached?.author?.handle || resolveHandle(handleEl?.getAttribute("href"));
   const authorName = article.querySelector("div[dir='ltr'] span")?.textContent?.trim() || cached?.author?.name || handle;
   const quotedInfo = extractQuotedPostData(article, tweetId, cached);
@@ -522,6 +554,13 @@ function extractQuotedPostData(article, rootTweetId, cachedRoot = null) {
   const href = quotedLink?.getAttribute("href") || "";
   const match = href.match(/status\/(\d+)/);
   const quotedTweetId = match ? match[1] : "";
+  const cachedQuotedTweet = quotedTweetId ? tweetMediaCache.get(quotedTweetId) || null : null;
+  if (cachedQuotedTweet?.tweet_id) {
+    return {
+      container: quotedContainer,
+      post: buildQuotedPayloadFromCached(cachedQuotedTweet)
+    };
+  }
   if (!quotedTweetId) {
     return quotedContainer ? { container: quotedContainer, post: null } : null;
   }
@@ -766,21 +805,46 @@ function collectVideoContext(article, excludeScope = null) {
 }
 
 function resolveTweetIdFromArticle(article) {
+  const focalTweetId = extractTweetId(location.href);
+  if (focalTweetId && findExactStatusLink(article, focalTweetId)) {
+    return focalTweetId;
+  }
+
   const timeAnchor = article.querySelector("time")?.closest("a[href*='/status/']");
   const timeHref = timeAnchor?.getAttribute("href") || "";
   const timeMatch = timeHref.match(/status\/(\d+)/);
   if (timeMatch) return timeMatch[1];
 
   for (const link of article.querySelectorAll("a[href*='/status/']")) {
-    const match = (link.getAttribute("href") || "").match(/status\/(\d+)/);
+    const href = link.getAttribute("href") || "";
+    if (!isExactStatusHref(href)) continue;
+    const match = href.match(/status\/(\d+)/);
     if (match) return match[1];
   }
   return "";
 }
 
 function resolveCanonicalUrl(article, tweetId) {
-  const href = article.querySelector(`a[href*="/status/${tweetId}"]`)?.getAttribute("href") || article.querySelector("a[href*='/status/']")?.getAttribute("href") || `/i/status/${tweetId}`;
+  const href =
+    findExactStatusLink(article, tweetId)?.getAttribute("href") ||
+    article.querySelector("a[href*='/status/']")?.getAttribute("href") ||
+    `/i/status/${tweetId}`;
   return new URL(href, location.origin).toString();
+}
+
+function findExactStatusLink(article, tweetId) {
+  for (const link of article.querySelectorAll("a[href*='/status/']")) {
+    const href = link.getAttribute("href") || "";
+    if (!isExactStatusHref(href)) continue;
+    const match = href.match(/status\/(\d+)/);
+    if (match?.[1] === tweetId) return link;
+  }
+  return null;
+}
+
+function isExactStatusHref(href) {
+  const value = String(href || "");
+  return /\/status\/\d+(?:\?.*)?$/.test(value);
 }
 
 function findActionBar(article) {
