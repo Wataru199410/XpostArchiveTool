@@ -432,11 +432,17 @@ function normalizeDirectVideoCandidates(videoContext) {
     if (!(host === "video.twimg.com" || host.endsWith(".twimg.com"))) continue;
 
     const path = parsed.pathname.toLowerCase();
+    const isInitSegment =
+      /\/(?:vid|aud)\/[^/]+\/0\/0\//i.test(path) ||
+      /\/(?:vid|aud)\/0\/0\//i.test(path);
+    if (isInitSegment) continue;
+
+    const isAudioOnly = path.includes("/aud/");
+    if (isAudioOnly) continue;
+
     const isLikelyVideo =
-      path.endsWith(".m3u8") ||
-      /\.(mp4|m4v|mov|webm|ts|mkv)$/i.test(path) ||
-      path.includes("/ext_tw_video/") ||
-      path.includes("/amplify_video/");
+      /\.(mp4|m4v|mov|webm|ts|mkv)$/i.test(path) &&
+      (path.includes("/ext_tw_video/") || path.includes("/amplify_video/"));
     if (!isLikelyVideo) continue;
 
     normalized.push(url);
@@ -447,10 +453,11 @@ function normalizeDirectVideoCandidates(videoContext) {
 
 function rankVideoCandidateUrl(url) {
   const value = String(url || "").toLowerCase();
-  if (/(?:\\.mp4|\\.m4v|\\.mov|\\.webm|\\.ts|\\.mkv)(?:\\?|$)/i.test(value) && value.includes("/vid/")) return 0;
-  if (value.includes(".m3u8") && value.includes("/pl/")) return 1;
-  if (/(?:\\.mp4|\\.m4v|\\.mov|\\.webm|\\.ts|\\.mkv)(?:\\?|$)/i.test(value) && value.includes("/aud/")) return 3;
-  if (/(?:\\.mp4|\\.m4v|\\.mov|\\.webm|\\.ts|\\.mkv)(?:\\?|$)/i.test(value)) return 2;
+  if (value.includes(".m3u8") && value.includes("/pl/")) return 0;
+  if (/\/(?:vid|aud)\/[^/]+\/0\/0\//i.test(value) || /\/(?:vid|aud)\/0\/0\//i.test(value)) return 9;
+  if (/(?:\.mp4|\.m4v|\.mov|\.webm|\.ts|\.mkv)(?:\?|$)/i.test(value) && value.includes("/vid/")) return 1;
+  if (/(?:\.mp4|\.m4v|\.mov|\.webm|\.ts|\.mkv)(?:\?|$)/i.test(value) && value.includes("/aud/")) return 8;
+  if (/(?:\.mp4|\.m4v|\.mov|\.webm|\.ts|\.mkv)(?:\?|$)/i.test(value)) return 2;
   return 4;
 }
 

@@ -233,6 +233,7 @@ async function installBridge(page, token, observedVideoUrls) {
   const bridgeScript = `
       window.chrome = {
         runtime: {
+          getURL: (relativePath) => relativePath,
           sendMessage: async (message) => {
             if (message && message.payload && message.payload.video_context) {
               const resources = performance.getEntriesByType('resource')
