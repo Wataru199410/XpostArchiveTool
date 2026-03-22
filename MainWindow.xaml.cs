@@ -189,10 +189,29 @@ public partial class MainWindow : Window
         }
 
         var delta = -e.Delta / 120.0;
-        var nextOffset = scrollViewer.VerticalOffset + (delta * 1.0);
+        var nextOffset = scrollViewer.VerticalOffset + (delta * GetPostCardScrollStep());
         nextOffset = Math.Max(0, Math.Min(nextOffset, scrollViewer.ScrollableHeight));
         scrollViewer.ScrollToVerticalOffset(nextOffset);
         e.Handled = true;
+    }
+
+    private double GetPostCardScrollStep()
+    {
+        if (PostsCardList.Items.Count == 0)
+        {
+            return 48.0;
+        }
+
+        for (var index = 0; index < PostsCardList.Items.Count; index++)
+        {
+            if (PostsCardList.ItemContainerGenerator.ContainerFromIndex(index) is ListBoxItem itemContainer &&
+                itemContainer.ActualHeight > 0)
+            {
+                return Math.Max(1.0, itemContainer.ActualHeight / 2.0);
+            }
+        }
+
+        return 48.0;
     }
 
     private void CardOpenQuotedPost_Click(object sender, RoutedEventArgs e)
