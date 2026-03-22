@@ -391,14 +391,7 @@ function shouldBindArticle(article, tweetId) {
     return true;
   }
 
-  if (tweetId !== focalTweetId) {
-    return false;
-  }
-
-  const statusLinks = [...article.querySelectorAll("a[href*='/status/']")]
-    .map((link) => link.getAttribute("href") || "");
-  const uniqueIds = [...new Set(statusLinks.map((href) => href.match(/status\/(\d+)/)?.[1]).filter(Boolean))];
-  return uniqueIds.length === 1 && uniqueIds[0] === focalTweetId;
+  return tweetId === focalTweetId;
 }
 
 async function ensureQuotedPostSaved(quotedPayload) {
