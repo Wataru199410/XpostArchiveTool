@@ -363,11 +363,7 @@ sealed record AppConfig(string Host, int Port, string StorageRootPath, string Da
 {
     public static AppConfig From(IConfiguration config)
     {
-        var ffmpegPath = config["Video:FfmpegPath"] ?? "third_party/ffmpeg/ffmpeg.exe";
-        if (!Path.IsPathRooted(ffmpegPath))
-        {
-            ffmpegPath = ResolveRelativePath(ffmpegPath);
-        }
+        var ffmpegPath = ResolveFfmpegPath(config["Video:FfmpegPath"] ?? "tools/ffmpeg.exe");
         var storageRootPath = ResolveDataPath(config["Storage:RootPath"] ?? "./XArchive", "XArchive");
         var databasePath = ResolveDataPath(config["Database:Path"] ?? "./data/archive.db", Path.Combine("data", "archive.db"));
         var tokenFilePath = ResolveDataPath(config["Auth:TokenFilePath"] ?? "./data/auth_token.txt", Path.Combine("data", "auth_token.txt"));
@@ -380,6 +376,32 @@ sealed record AppConfig(string Host, int Port, string StorageRootPath, string Da
             ffmpegPath,
             int.TryParse(config["Video:RetryCount"], out var r) ? r : 2
         );
+    }
+
+    private static string ResolveFfmpegPath(string configuredPath)
+    {
+        if (Path.IsPathRooted(configuredPath))
+        {
+            return configuredPath;
+        }
+
+        var candidates = new List<string>
+        {
+            configuredPath,
+            "tools/ffmpeg.exe",
+            "third_party/ffmpeg/ffmpeg.exe"
+        };
+
+        foreach (var candidate in candidates.Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var resolved = ResolveRelativePath(candidate);
+            if (File.Exists(resolved))
+            {
+                return resolved;
+            }
+        }
+
+        return ResolveRelativePath(configuredPath);
     }
 
     private static string ResolveRelativePath(string relativePath)
