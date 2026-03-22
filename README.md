@@ -1,123 +1,96 @@
 # X Post Archive Tool
 
-X の投稿をローカルへ保存し、WPF デスクトップアプリで一覧・検索・タグ管理できるツールです。
+X の投稿をローカルに保存し、Windows デスクトップアプリで一覧・検索・タグ管理できるツールです。
 
-- デスクトップ: `WPF (.NET 8)`
-- ローカル API: `ASP.NET Core`
-- ブラウザ拡張: `Chrome Extension (Manifest V3)`
-- 保存先: `XArchive/tweet-<tweet_id>/...`
-- DB: `SQLite`
-- API: `http://127.0.0.1:18765`
+構成は次の 3 層です。
 
-この README は、今後の保守と AI 駆動開発で構造を把握しやすくするために、現状実装ベースで更新しています。
+- Chrome 拡張: X の投稿ページに保存ボタンを表示し、投稿内容を抽出する
+- ローカル API: 画像・動画・DB 保存を行う
+- WPF デスクトップアプリ: 保存済み投稿の閲覧、検索、タグ管理、削除を行う
 
 ## 設計概要
 
-全体は次の 3 層です。
+### 役割分担
 
-1. Chrome 拡張
-   X の投稿ページへ保存ボタンを差し込み、投稿本文・画像・動画候補・引用元情報・タグ・メモを収集してローカル API に送ります。
-2. ローカル API
-   投稿情報を検証し、画像保存、動画ダウンロード、SQLite 更新、引用関係更新を行います。
-3. デスクトップアプリ
-   保存済み投稿の一覧表示、詳細表示、検索、タグ絞り込み、削除、タグ管理を行います。
+1. `content.js`
+   X のページ上で動く content script です。投稿本文、投稿者、画像、動画候補、引用元情報を抽出し、保存モーダルを表示します。
 
-### 主要な保存フロー
+2. `service_worker.js`
+   Chrome 拡張の background script です。ローカル API 認証、保存リクエスト送信、動画候補 URL の最終選定を担当します。
 
-1. `content.js` が X 上の投稿から保存対象データを抽出
-2. `service_worker.js` がローカル API へ送信
-3. `Program.cs` が `posts / media / tags / post_tags` を更新
-4. 画像は即保存、動画はバックグラウンドジョブで保存
-5. デスクトップアプリが `archive.db` を読み、一覧と詳細を表示
+3. `Program.cs`
+   ローカル API 本体です。投稿保存、更新、タグ取得、動画ダウンロード、SQLite 更新を担当します。
 
-### データの持ち方
+4. デスクトップアプリ
+   `MainWindow.xaml(.cs)` を中心に、投稿一覧・詳細表示、タグ絞り込み、タグ管理、削除、引用元/引用先ジャンプを提供します。
 
-- 正本は SQLite です
-- メディア本体はファイルとして `XArchive/` 配下に保存します
-- `meta.json` は廃止済みで、ランタイムでは使用していません
+### 保存データ
+
+- 投稿メディア: `XArchive/tweet-<tweet_id>/...`
+- SQLite DB: `data/archive.db` または配布版では `%LocalAppData%\XPostArchive\data\archive.db`
+- 認証トークン: `data/auth_token.txt` または配布版では `%LocalAppData%\XPostArchive\data\auth_token.txt`
+
+配布版では保存データをインストール先ではなく `%LocalAppData%\XPostArchive\...` に保存します。そのため、通常の上書き更新では保存済みデータが消えにくい構成です。
 
 ## ディレクトリ構成
 
-### アプリ本体
+### デスクトップアプリ
 
-- [App.xaml](/C:/Users/tsuba/Desktop/x-post/App.xaml)
-  WPF アプリ定義
-- [App.xaml.cs](/C:/Users/tsuba/Desktop/x-post/App.xaml.cs)
-  アプリ起動処理
-- [MainWindow.xaml](/C:/Users/tsuba/Desktop/x-post/MainWindow.xaml)
-  メイン画面 UI
-- [MainWindow.xaml.cs](/C:/Users/tsuba/Desktop/x-post/MainWindow.xaml.cs)
-  一覧、詳細、検索、タグ絞り込み、削除、引用遷移のロジック
-- [DesktopArchiveStore.cs](/C:/Users/tsuba/Desktop/x-post/DesktopArchiveStore.cs)
+- `App.xaml`, `App.xaml.cs`
+  アプリ起動定義
+- `MainWindow.xaml`, `MainWindow.xaml.cs`
+  メイン UI と画面ロジック
+- `DesktopArchiveStore.cs`
   デスクトップ側の DB 読み書き
-- [LocalApiManager.cs](/C:/Users/tsuba/Desktop/x-post/LocalApiManager.cs)
-  ローカル API の起動・停止管理
-- [TagEditWindow.xaml](/C:/Users/tsuba/Desktop/x-post/TagEditWindow.xaml)
-  投稿詳細から開くタグ編集モーダル UI
-- [TagEditWindow.xaml.cs](/C:/Users/tsuba/Desktop/x-post/TagEditWindow.xaml.cs)
-  タグ追加・削除・候補表示ロジック
-- [TagManagementWindow.xaml](/C:/Users/tsuba/Desktop/x-post/TagManagementWindow.xaml)
-  タグ管理画面 UI
-- [TagManagementWindow.xaml.cs](/C:/Users/tsuba/Desktop/x-post/TagManagementWindow.xaml.cs)
-  タグ新規追加・削除ロジック
-- [TagCatalogStore.cs](/C:/Users/tsuba/Desktop/x-post/TagCatalogStore.cs)
-  タグマスタ操作の共通処理
+- `LocalApiManager.cs`
+  ローカル API の起動・停止・疎通確認
+- `TagEditWindow.xaml`, `TagEditWindow.xaml.cs`
+  投稿詳細のタグ編集モーダル
+- `TagManagementWindow.xaml`, `TagManagementWindow.xaml.cs`
+  タグ管理画面
+- `TagCatalogStore.cs`
+  タグ一覧の読み書き
 
 ### ローカル API
 
-- [Program.cs](/C:/Users/tsuba/Desktop/x-post/Program.cs)
-  API 本体。保存、更新、取得、動画ジョブ、認証、DB 更新の中心
-- [schema.sql](/C:/Users/tsuba/Desktop/x-post/schema.sql)
+- `Program.cs`
+  API 本体
+- `schema.sql`
   SQLite スキーマ
-- [appsettings.json](/C:/Users/tsuba/Desktop/x-post/appsettings.json)
-  ホスト、ポート、保存先、DB パス、ffmpeg パス設定
+- `appsettings.json`
+  API 設定
 
 ### Chrome 拡張
 
-- [manifest.json](/C:/Users/tsuba/Desktop/x-post/manifest.json)
+- `manifest.json`
   拡張定義
-- [content.js](/C:/Users/tsuba/Desktop/x-post/content.js)
-  X ページで動く content script
-- [service_worker.js](/C:/Users/tsuba/Desktop/x-post/service_worker.js)
-  API 通信と保存フローを扱う background script
-- [page_hook.js](/C:/Users/tsuba/Desktop/x-post/page_hook.js)
-  X ページ本体の `fetch / XHR` をフックして API 応答を content script に渡す
+- `content.js`
+  X ページ上で動く content script
+- `service_worker.js`
+  拡張の background script
+- `page_hook.js`
+  ページ本体の `fetch/XHR` をフックし、X の API 応答を content script に渡す
 
-### 配布・テスト
+### 配布・検証
 
-- [publish.bat](/C:/Users/tsuba/Desktop/x-post/publish.bat)
-  desktop/server の publish
-- [build-installer.bat](/C:/Users/tsuba/Desktop/x-post/build-installer.bat)
-  Inno Setup でインストーラー生成
-- [XPostArchive.iss](/C:/Users/tsuba/Desktop/x-post/XPostArchive.iss)
-  インストーラー定義
-- [scripts/playwright-manual-check.cjs](/C:/Users/tsuba/Desktop/x-post/scripts/playwright-manual-check.cjs)
-  保存動作の手動確認
-- [scripts/playwright-save-post-e2e.cjs](/C:/Users/tsuba/Desktop/x-post/scripts/playwright-save-post-e2e.cjs)
-  投稿保存の E2E
-- [scripts/playwright-verify-video-save.cjs](/C:/Users/tsuba/Desktop/x-post/scripts/playwright-verify-video-save.cjs)
-  動画保存の検証
-- [scripts/playwright-copy-error-e2e.cjs](/C:/Users/tsuba/Desktop/x-post/scripts/playwright-copy-error-e2e.cjs)
-  エラー UI の確認
-
-### 実行時に生成されるもの
-
-次は Git 管理対象ではありません。
-
-- `XArchive/`
-  保存済み投稿本体
-- `data/archive.db`
-  SQLite DB
-- `data/auth_token.txt`
-  API トークン
-- `dist/`
-  publish / installer 生成物
-- `bin/`, `obj/`, `obj-api/`
-  ビルド生成物
+- `publish.bat`
+  desktop / server の publish 実行
+- `build-installer.bat`
+  Inno Setup を使ったインストーラー生成
+- `XPostArchive.iss`
+  Inno Setup 定義
+- `scripts/playwright-manual-check.cjs`
+  手動確認用 Playwright
+- `scripts/playwright-save-post-e2e.cjs`
+  投稿保存 E2E
+- `scripts/playwright-verify-video-save.cjs`
+  動画保存検証
+- `scripts/playwright-copy-error-e2e.cjs`
+  エラー UI 検証
 
 ## 主な API
 
-### 認証・状態確認
+### ヘルスチェック・認証
 
 - `GET /api/v1/health`
 - `POST /api/v1/auth/bootstrap`
@@ -127,18 +100,18 @@ X の投稿をローカルへ保存し、WPF デスクトップアプリで一�
 - `POST /api/v1/posts`
   新規保存
 - `PUT /api/v1/posts/{tweetId}`
-  上書き保存
+  既存投稿の更新
 - `GET /api/v1/posts/{tweetId}`
-  保存済み確認
+  保存済み投稿の取得
 
 ### タグ
 
 - `GET /api/v1/tags`
-  タグ候補一覧
+  タグ一覧取得
 
-## 開発時の基本コマンド
+## 開発用コマンド
 
-### デスクトップ起動
+### デスクトップアプリ起動
 
 ```powershell
 dotnet run --project XPostArchive.Desktop.csproj
@@ -174,75 +147,98 @@ npm run test:e2e:save-post
 
 ## Chrome 拡張の読み込み
 
-1. `chrome://extensions` を開く
-2. デベロッパーモードを ON
-3. `パッケージ化されていない拡張機能を読み込む`
-4. このリポジトリ直下を選択
+1. Chrome で `chrome://extensions` を開く
+2. `デベロッパーモード` を ON にする
+3. `パッケージ化されていない拡張機能を読み込む` を押す
+4. このリポジトリのフォルダを選ぶ
 
-拡張更新後は、次も必要です。
+## インストーラーのビルド手順
 
-- 拡張を再読み込み
-- 対象の X タブを開き直す
-
-## 配布
-
-### publish
-
-```powershell
-publish.bat
-```
-
-出力先:
-
-- `dist/publish/desktop`
-- `dist/publish/server`
-
-### インストーラー生成
-
-前提:
+### 前提
 
 - .NET 8 SDK
 - Inno Setup 6
 - `third_party/ffmpeg/ffmpeg.exe`
 
+### 手順
+
+リポジトリ直下で次を実行します。
+
 ```powershell
 build-installer.bat
 ```
 
-出力先:
+内部では次を行います。
 
-- `dist/installer/XPostArchive-Setup.exe`
+1. `publish.bat` で desktop / server を publish
+2. `XPostArchive.iss` を使って Inno Setup でインストーラー化
+
+### 出力先
+
+- `dist\installer\XPostArchive-Setup.exe`
+
+## 共有相手に伝えるインストール手順
+
+### 1. アプリのインストール
+
+1. `XPostArchive-Setup.exe` を実行する
+2. 画面の案内に従ってインストールする
+3. インストール後、デスクトップアプリを一度起動する
+
+### 2. Chrome 拡張の読み込み
+
+1. Chrome で `chrome://extensions` を開く
+2. `デベロッパーモード` を ON にする
+3. `パッケージ化されていない拡張機能を読み込む` を押す
+4. 既定のインストール先なら、次のフォルダを選ぶ
+
+```text
+C:\Program Files\XPostArchive\extension
+```
+
+インストール先を変更した場合は、`{インストール先}\extension` を選んでください。
+
+### 3. 使い方
+
+1. X にログインした状態で保存したい投稿を開く
+2. 投稿に表示される `保存` または `上書き保存` を押す
+3. 必要に応じてタグ・メモを入力して保存する
+4. 保存済み投稿はデスクトップアプリ側の一覧に表示される
+
+### 4. 更新方法
+
+- 新しい版を受け取ったら、古い版を削除せずそのまま上書きインストールする
+- 保存データは `%LocalAppData%\XPostArchive\...` にあるため、通常の更新では消えない
+
+### 5. 注意点
+
+- 動画付き投稿はバックグラウンド保存になることがある
+- 動画保存中にアプリを閉じると中断される
+- Chrome 拡張を更新した場合は `chrome://extensions` で再読み込みが必要
+
+## 実行時生成物
+
+次は Git 管理対象外です。
+
+- `XArchive/`
+- `data/archive.db`
+- `data/auth_token.txt`
+- `dist/`
+- `bin/`, `obj/`, `obj-api/`
 
 ## AI 駆動開発向けメモ
 
-### まず読むべきファイル
+### 読み始める順番
 
-優先順位は次の順が把握しやすいです。
+1. `Program.cs`
+2. `content.js`
+3. `service_worker.js`
+4. `DesktopArchiveStore.cs`
+5. `MainWindow.xaml.cs`
 
-1. [Program.cs](/C:/Users/tsuba/Desktop/x-post/Program.cs)
-2. [content.js](/C:/Users/tsuba/Desktop/x-post/content.js)
-3. [service_worker.js](/C:/Users/tsuba/Desktop/x-post/service_worker.js)
-4. [DesktopArchiveStore.cs](/C:/Users/tsuba/Desktop/x-post/DesktopArchiveStore.cs)
-5. [MainWindow.xaml.cs](/C:/Users/tsuba/Desktop/x-post/MainWindow.xaml.cs)
+### 前提として知っておくこと
 
-### 実装上の前提
-
-- 動画はバックグラウンド保存です
-- デスクトップアプリ終了時、保存中動画は中断されます
-- 引用元投稿は `quoted_tweet_id` / `quoted_post_id` で管理します
-- `content.js` は DOM だけでなく X の API 応答キャッシュも参照します
-- 画像・動画の実体はファイル、メタ情報は DB に分離されています
-
-### 変更時に注意する点
-
-- `content.js` 更新後は、拡張の再読み込みだけでなく X タブの開き直しが必要なことがあります
-- `Program.cs` は保存・更新・動画ジョブ・認証が集中しているため、副作用確認が重要です
-- 投稿削除と更新は DB とファイルの整合性を崩しやすいので、レビュー優先度を高くしてください
-- 動画保存まわりは Playwright と実ファイル確認の両方で見るのが安全です
-
-## 既知の性質
-
-- API は `127.0.0.1` bind です
-- 認証 bootstrap は localhost 前提の簡易設計です
-- 動画保存は X 側配信方式の変化に影響されやすいです
-- Playwright での確認結果と、ログイン済みブラウザ表示が完全一致しないケースがあります
+- 投稿保存の正本は DB
+- 動画はバックグラウンドジョブで保存される
+- 引用元/引用先は `quoted_tweet_id` / `quoted_post_id` で管理される
+- `content.js` は DOM 抽出だけでなく、`page_hook.js` 経由で X の API 応答も利用する
