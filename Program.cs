@@ -675,6 +675,59 @@ static class Video
         return DirectVideoExtensions.Contains(extension, StringComparer.OrdinalIgnoreCase) ? extension : "mp4";
     }
 
+    public static string GetThumbnailPath(string videoPath)
+    {
+        var directory = Path.GetDirectoryName(videoPath) ?? string.Empty;
+        var fileName = Path.GetFileNameWithoutExtension(videoPath);
+        return Path.Combine(directory, $"{fileName}.thumb.jpg");
+    }
+
+    public static async Task GenerateThumbnailAsync(string ffmpegPath, string videoPath, CancellationToken ct)
+    {
+        if (!File.Exists(videoPath))
+        {
+            return;
+        }
+
+        var thumbnailPath = GetThumbnailPath(videoPath);
+        DeleteIfExists(thumbnailPath);
+        Directory.CreateDirectory(Path.GetDirectoryName(thumbnailPath)!);
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = ffmpegPath,
+            RedirectStandardError = true,
+            RedirectStandardOutput = false,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+        psi.ArgumentList.Add("-nostdin");
+        psi.ArgumentList.Add("-v");
+        psi.ArgumentList.Add("error");
+        psi.ArgumentList.Add("-y");
+        psi.ArgumentList.Add("-ss");
+        psi.ArgumentList.Add("00:00:00.500");
+        psi.ArgumentList.Add("-i");
+        psi.ArgumentList.Add(videoPath);
+        psi.ArgumentList.Add("-frames:v");
+        psi.ArgumentList.Add("1");
+        psi.ArgumentList.Add("-q:v");
+        psi.ArgumentList.Add("2");
+        psi.ArgumentList.Add(thumbnailPath);
+
+        using var process = Process.Start(psi);
+        if (process is null)
+        {
+            return;
+        }
+
+        await process.WaitForExitAsync(ct);
+        if (process.ExitCode != 0 || !File.Exists(thumbnailPath))
+        {
+            DeleteIfExists(thumbnailPath);
+        }
+    }
+
     public static bool IsUsableSavedVideoFile(string path)
     {
         try
@@ -1476,6 +1529,7 @@ sealed class VideoDownloadQueue
                         var result = await Video.DownloadAsync(client, _appConfig.FfmpegPath, job.source_url, job.full_path, job.retry_count, CancellationToken.None);
                         if (result.Ok)
                         {
+                            await Video.GenerateThumbnailAsync(_appConfig.FfmpegPath, job.full_path, CancellationToken.None);
                             Console.WriteLine($"VIDEO_JOB_OK media_id={job.media_id} path={job.full_path}");
                             await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "completed", null, CancellationToken.None);
                         }
@@ -1538,6 +1592,7 @@ sealed class VideoDownloadWorker : BackgroundService
                 var result = await Video.DownloadAsync(client, _appConfig.FfmpegPath, job.source_url, job.full_path, job.retry_count, stoppingToken);
                 if (result.Ok)
                 {
+                    await Video.GenerateThumbnailAsync(_appConfig.FfmpegPath, job.full_path, stoppingToken);
                     Console.WriteLine($"VIDEO_JOB_OK media_id={job.media_id} path={job.full_path}");
                     await Db.UpdateMediaDownloadStateAsync(_appConfig.DatabasePath, job.media_id, "completed", null, stoppingToken);
                 }
@@ -1583,6 +1638,11 @@ sealed class VideoDownloadWorker : BackgroundService
             if (File.Exists(path))
             {
                 File.Delete(path);
+            }
+            var thumbnailPath = Video.GetThumbnailPath(path);
+            if (File.Exists(thumbnailPath))
+            {
+                File.Delete(thumbnailPath);
             }
         }
         catch

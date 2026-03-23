@@ -486,7 +486,7 @@
                                                         <ColumnDefinition Width="*"/>
                                                     </Grid.ColumnDefinitions>
                                                     <Border Width="96" Height="72" CornerRadius="8" Background="#E5E7EB">
-                                                        <Image Source="{Binding FullPath, Converter={StaticResource FileImageSourceConverter}}" Stretch="UniformToFill"/>
+                                                        <Image Source="{Binding PreviewPath, Converter={StaticResource FileImageSourceConverter}}" Stretch="UniformToFill"/>
                                                     </Border>
                                                     <StackPanel Grid.Column="1" Margin="12,0,0,0">
                                                         <TextBox Text="{Binding Display, Mode=OneWay}" FontWeight="SemiBold" Foreground="{StaticResource TextMain}" Style="{StaticResource SelectableTextDisplay}"/>

@@ -100,6 +100,29 @@ function tryProcessApiResponse(input, response) {
   }
 }
 
+function isExtensionContextInvalidatedError(error) {
+  return String(error?.message || error || "").includes("Extension context invalidated");
+}
+
+async function sendRuntimeMessage(message) {
+  try {
+    return await chrome.runtime.sendMessage(message);
+  } catch (error) {
+    if (isExtensionContextInvalidatedError(error)) {
+      throw new Error("EXTENSION_CONTEXT_INVALIDATED");
+    }
+    throw error;
+  }
+}
+
+async function showExtensionReloadRequired() {
+  await showResultDialog(
+    "拡張機能の再読み込みが必要です",
+    "拡張機能が更新されたため、このタブで動いている古いスクリプトが無効になっています。\n\nchrome://extensions で拡張機能を再読み込みしてから、X のタブを開き直してください。",
+    true
+  );
+}
+
 function isInterestingApiUrl(url) {
   const value = String(url || "");
   return value.includes("/TweetDetail")
@@ -329,7 +352,7 @@ async function loadPostStatus(tweetId, force = false) {
   if (!force && postStatusCache.has(tweetId)) return postStatusCache.get(tweetId);
   if (!force && postStatusInflight.has(tweetId)) return await postStatusInflight.get(tweetId);
   const task = (async () => {
-    const result = await chrome.runtime.sendMessage({ type: "GET_POST_STATUS", tweetId });
+    const result = await sendRuntimeMessage({ type: "GET_POST_STATUS", tweetId });
     if (!result?.ok) throw new Error(`POST_STATUS_FETCH_FAILED:${result?.status ?? 0}`);
     const status = { exists: result.body?.exists === true, post: result.body?.post || null };
     postStatusCache.set(tweetId, status);
@@ -350,7 +373,7 @@ async function onInlineSaveClick(article, button) {
     setButtonState(button, "準備中...", true);
     const payload = await extractPostData(article);
     const postStatus = await loadPostStatus(payload.tweet_id, true);
-    const tagCatalogResult = await chrome.runtime.sendMessage({ type: "GET_TAG_CATALOG" });
+    const tagCatalogResult = await sendRuntimeMessage({ type: "GET_TAG_CATALOG" });
     if (!tagCatalogResult?.ok) {
       await showResultDialog("タグ一覧の取得に失敗しました", buildErrorDetail(tagCatalogResult, { step: "GET_TAG_CATALOG", tweet_id: payload.tweet_id, url: payload.url }), true);
       return;
@@ -395,7 +418,7 @@ async function onInlineSaveClick(article, button) {
 
 async function saveOrUpdate(type, payload, button, progressLabel, successTitle, successText) {
   setButtonState(button, progressLabel, true);
-  const result = await chrome.runtime.sendMessage({ type, payload });
+  const result = await sendRuntimeMessage({ type, payload });
   if (!result?.ok) {
     const body = result?.body || {};
     const detail = buildErrorDetail(result, payload);
@@ -403,7 +426,7 @@ async function saveOrUpdate(type, payload, button, progressLabel, successTitle, 
       const retry = await showConfirmDialog(type === "UPDATE_POST" ? "上書き保存に失敗しました" : "保存に失敗しました", `${body.message || "リクエストに失敗しました。"}\n\n再試行しますか？`, detail);
       if (retry) {
         setButtonState(button, "再試行中...", true);
-        const retryResult = await chrome.runtime.sendMessage({ type, payload });
+        const retryResult = await sendRuntimeMessage({ type, payload });
         if (!retryResult?.ok) {
           await showResultDialog("再試行に失敗しました", buildErrorDetail(retryResult, payload), true);
           throw new Error("RETRY_FAILED");
@@ -440,7 +463,7 @@ async function ensureQuotedPostSaved(quotedPayload) {
   } catch {
   }
 
-  const result = await chrome.runtime.sendMessage({ type: "SAVE_POST", payload: quotedPayload });
+  const result = await sendRuntimeMessage({ type: "SAVE_POST", payload: quotedPayload });
   if (result?.ok || result?.body?.error_code === "POST_ALREADY_EXISTS") {
     postStatusCache.set(tweetId, { exists: true, post: { ...quotedPayload } });
     return;
@@ -1038,6 +1061,11 @@ function buildErrorDetail(result, payload) {
 }
 
 async function showResultDialog(title, detailText, isError) {
+  if (String(detailText || "").includes("EXTENSION_CONTEXT_INVALIDATED") || String(detailText || "").includes("Extension context invalidated")) {
+    title = "拡張機能の再読み込みが必要です";
+    detailText = "拡張機能が更新されたため、このタブで動いている古いスクリプトが無効になっています。\n\nchrome://extensions で拡張機能を再読み込みしてから、X のタブを開き直してください。";
+    isError = true;
+  }
   closeExistingModal();
   const { root, okButton, copyButton } = createDetailModal(title, detailText, isError, false, extractPrimaryErrorMessage(detailText));
   copyButton.addEventListener("click", async () => copyText(detailText));

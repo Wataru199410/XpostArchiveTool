@@ -1229,6 +1229,7 @@ public sealed class MediaFileItem
     public string Type { get; init; } = string.Empty;
     public string Display { get; init; } = string.Empty;
     public string FullPath { get; init; } = string.Empty;
+    public string PreviewPath { get; init; } = string.Empty;
     public string DownloadStatus { get; init; } = "completed";
     public string DownloadError { get; init; } = string.Empty;
     public string StatusTextDisplay => DownloadStatus switch

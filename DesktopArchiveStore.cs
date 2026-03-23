@@ -40,7 +40,10 @@ internal static class DesktopArchiveStore
                     tagList ??= [];
                     mediaFiles ??= [];
 
-                    var thumbnailPath = mediaFiles.FirstOrDefault(x => x.Type == "image" && File.Exists(x.FullPath))?.FullPath ?? string.Empty;
+                    var thumbnailPath =
+                        mediaFiles.FirstOrDefault(x => x.Type == "image" && File.Exists(x.PreviewPath))?.PreviewPath
+                        ?? mediaFiles.FirstOrDefault(x => x.Type == "video" && File.Exists(x.PreviewPath))?.PreviewPath
+                        ?? string.Empty;
                     var videoStatus = BuildVideoStatusText(mediaFiles);
 
                     return new PostListItem
@@ -850,6 +853,9 @@ ORDER BY m.post_id, m.sort_order ASC;";
                 Type = mediaType,
                 Display = mediaType == "video" ? $"[video] {localPath}" : $"[image] {localPath}",
                 FullPath = Path.GetFullPath(Path.Combine(dirPath, localPath)),
+                PreviewPath = mediaType == "video"
+                    ? GetVideoThumbnailPath(Path.GetFullPath(Path.Combine(dirPath, localPath)))
+                    : Path.GetFullPath(Path.Combine(dirPath, localPath)),
                 DownloadStatus = downloadStatus,
                 DownloadError = downloadError
             });
@@ -877,6 +883,13 @@ ORDER BY m.post_id, m.sort_order ASC;";
         }
 
         return "動画保存済み";
+    }
+
+    private static string GetVideoThumbnailPath(string videoPath)
+    {
+        var directory = Path.GetDirectoryName(videoPath) ?? string.Empty;
+        var fileName = Path.GetFileNameWithoutExtension(videoPath);
+        return Path.Combine(directory, $"{fileName}.thumb.jpg");
     }
 
     private sealed record PostRow(
