@@ -4,6 +4,7 @@ const BUTTON_HOST_ATTR = "data-x-post-archive-save-host";
 const ARTICLE_BOUND_ATTR = "data-x-post-archive-bound";
 const MODAL_ID = "x-post-archive-modal";
 const TOAST_ID = "x-post-archive-toast";
+const DM_EXPORT_BUTTON_ID = "x-post-archive-dm-export";
 const TAG_LIMIT = 30;
 const TAG_MAX_COUNT = 10;
 const API_PAYLOAD_EVENT = "__x_post_archive_api_payload__";
@@ -23,12 +24,14 @@ function boot() {
   installApiResponseHooks();
   installStyles();
   scanArticles();
+  syncDmExportButton();
   const observer = new MutationObserver(() => {
     if (scanScheduled) return;
     scanScheduled = true;
     requestAnimationFrame(() => {
       scanScheduled = false;
       scanArticles();
+      syncDmExportButton();
     });
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
@@ -296,8 +299,474 @@ function installStyles() {
     .x-post-archive-toast.is-visible{opacity:1;transform:translateY(0)}
     .x-post-archive-toast-title{font-size:24px;font-weight:800;line-height:1.3}
     .x-post-archive-toast-text{margin-top:8px;font-size:20px;line-height:1.5;opacity:.92;white-space:pre-wrap}
+    .x-post-archive-dm-export-host{position:fixed;top:16px;right:24px;z-index:2147483647;display:flex;justify-content:flex-end;pointer-events:none}
+    .x-post-archive-dm-export{display:inline-flex;align-items:center;justify-content:center;min-width:146px;height:38px;border:none;border-radius:999px;padding:0 18px;background:#111827;color:#fff;font-size:14px;font-weight:700;cursor:pointer;box-shadow:0 12px 28px rgba(15,23,42,.36);pointer-events:auto}
+    .x-post-archive-dm-export:hover{background:#1f2937}
+    .x-post-archive-dm-export:disabled{opacity:.65;cursor:default}
   `;
   document.documentElement.appendChild(style);
+}
+
+function isDmPage() {
+  return /^\/messages(\/|$)/.test(location.pathname)
+    || /^\/i\/chat(\/|$)/.test(location.pathname);
+}
+
+function syncDmExportButton() {
+  const existing = document.getElementById(DM_EXPORT_BUTTON_ID);
+  if (!isDmPage()) {
+    existing?.closest(".x-post-archive-dm-export-host")?.remove();
+    return;
+  }
+
+  const host = document.body;
+  if (!host || !host.isConnected) {
+    existing?.closest(".x-post-archive-dm-export-host")?.remove();
+    return;
+  }
+
+  if (existing && host.contains(existing)) {
+    return;
+  }
+
+  existing?.closest(".x-post-archive-dm-export-host")?.remove();
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "x-post-archive-dm-export-host";
+  const button = document.createElement("button");
+  button.id = DM_EXPORT_BUTTON_ID;
+  button.type = "button";
+  button.className = "x-post-archive-dm-export";
+  button.textContent = "CSV出力";
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await exportDmLinksAsCsv(button);
+  });
+  wrapper.appendChild(button);
+  if (!host.isConnected) {
+    return;
+  }
+  host.appendChild(wrapper);
+}
+
+async function exportDmLinksAsCsv(button) {
+  const originalLabel = button.textContent;
+  try {
+    button.disabled = true;
+    button.textContent = "抽出中...";
+    button.textContent = "Loading...";
+    const rows = await collectAllDmCsvRows(button);
+    if (rows.length === 0) {
+      await showResultDialog("URLが見つかりませんでした", "現在表示中のDMから X の投稿URLを抽出できませんでした。DM を少しスクロールしてから再度お試しください。", true);
+      return;
+    }
+
+    downloadCsv(buildDmCsv(rows), `x-post-archive-dm-${formatDateForFile(new Date())}.csv`);
+    showSuccessToast("CSVを出力しました", `URL: ${rows.length}件\n現在表示中のDM範囲から抽出しました。`);
+  } catch (error) {
+    await showResultDialog("CSV出力に失敗しました", `Unhandled Error\n\n${String(error)}\n\n${error?.stack || ""}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel || "CSV出力";
+  }
+}
+
+async function collectAllDmCsvRows(button) {
+  const rowsByUrl = new Map();
+  const scrollContainers = findDmConversationScrollContainers();
+  collectDmCsvRowsInto(rowsByUrl);
+
+  if (scrollContainers.length === 0) {
+    return rowsFromMap(rowsByUrl);
+  }
+
+  let stagnantCount = 0;
+  let previousSignature = getDmScrollSignature(scrollContainers, rowsByUrl.size);
+
+  for (let index = 0; index < 120; index += 1) {
+    if (button?.isConnected) {
+      button.textContent = `èª­ã¿è¾¼ã¿ä¸­... ${rowsByUrl.size}`;
+    }
+
+    if (button?.isConnected) {
+      button.textContent = `Loading... ${rowsByUrl.size}`;
+    }
+
+    const beforeSignature = getDmScrollSignature(scrollContainers, rowsByUrl.size);
+    for (const scrollContainer of scrollContainers) {
+      const step = Math.max(Math.floor(scrollContainer.clientHeight * 0.85), 320);
+      const maxTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+      const movingUp = scrollContainer.scrollTop > 4;
+      if (movingUp) {
+        scrollContainer.scrollTop = Math.max(0, scrollContainer.scrollTop - step);
+      } else {
+        scrollContainer.scrollTop = Math.min(maxTop, scrollContainer.scrollTop + step);
+      }
+      scrollContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+    }
+    await waitMs(1200);
+    collectDmCsvRowsInto(rowsByUrl);
+
+    const currentSignature = getDmScrollSignature(scrollContainers, rowsByUrl.size);
+    const stuck = scrollContainers.every((scrollContainer) => {
+      const maxTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+      return scrollContainer.scrollTop <= 4 || Math.abs(scrollContainer.scrollTop - maxTop) <= 4;
+    });
+    const noGrowth = currentSignature === previousSignature;
+    const noMovement = currentSignature === beforeSignature;
+
+    if ((stuck && noGrowth) || noMovement) {
+      stagnantCount += 1;
+    } else {
+      stagnantCount = 0;
+    }
+
+    previousSignature = currentSignature;
+    if (stagnantCount >= 4) {
+      break;
+    }
+  }
+
+  return rowsFromMap(rowsByUrl);
+}
+
+function collectDmCsvRows() {
+  const rowsByUrl = new Map();
+  collectDmCsvRowsInto(rowsByUrl);
+  return rowsFromMap(rowsByUrl);
+}
+
+function collectDmCsvRowsInto(rowsByUrl) {
+  const main = document.querySelector("main") || document.body;
+  const anchors = [...main.querySelectorAll("a[href*='/status/']")]
+    .map((anchor, index) => ({
+      anchor,
+      index,
+      top: Math.round(anchor.getBoundingClientRect().top)
+    }))
+    .sort((left, right) => left.top - right.top || left.index - right.index)
+    .map((item) => item.anchor);
+
+  anchors.forEach((anchor, order) => {
+    const href = anchor.href || "";
+    const url = normalizeTweetUrl(href);
+    if (!url) return;
+
+    const tags = extractTagsFromDmAnchor(anchor);
+    const current = rowsByUrl.get(url) || { tags: new Set(), order };
+    current.order = order;
+    for (const tag of tags) {
+      current.tags.add(tag);
+    }
+    rowsByUrl.set(url, current);
+  });
+}
+
+function rowsFromMap(rowsByUrl) {
+  return [...rowsByUrl.entries()]
+    .map(([url, tags]) => ({
+      url,
+      tags: [...tags.tags].sort((a, b) => a.localeCompare(b, "ja")),
+      order: Number.isFinite(tags.order) ? tags.order : Number.MAX_SAFE_INTEGER
+    }))
+    .sort((left, right) => left.order - right.order)
+    .map(({ order, ...row }) => row);
+}
+
+function findDmConversationScrollContainers() {
+  const main = document.querySelector("main");
+  if (!(main instanceof HTMLElement)) {
+    return [];
+  }
+
+  const composer = main.querySelector("div[data-testid='dmComposerTextInput'], [data-testid='dmComposerTextInput'], textarea");
+  const composerRect = composer instanceof HTMLElement ? composer.getBoundingClientRect() : null;
+  const candidates = [main, ...main.querySelectorAll("div, section")];
+  const scored = [];
+
+  for (const candidate of candidates) {
+    if (!(candidate instanceof HTMLElement)) {
+      continue;
+    }
+
+    const style = getComputedStyle(candidate);
+    if (!/(auto|scroll)/.test(style.overflowY || "")) {
+      continue;
+    }
+
+    if (candidate.scrollHeight <= candidate.clientHeight + 80 || candidate.clientHeight < 180) {
+      continue;
+    }
+
+    const rect = candidate.getBoundingClientRect();
+    if (rect.width < 260 || rect.height < 240) {
+      continue;
+    }
+
+    const text = candidate.innerText || "";
+    let score = candidate.scrollHeight - candidate.clientHeight;
+    const anchorCount = candidate.querySelectorAll("a[href*='/status/']").length;
+    score += Math.min(anchorCount, 20) * 180;
+    if (text.includes("メッセージ")) score += 200;
+    if (text.includes("You sent a video")) score += 120;
+    if (rect.left > window.innerWidth * 0.2) score += 150;
+    if (rect.width > window.innerWidth * 0.4) score += 150;
+    if (composerRect) {
+      if (rect.right >= composerRect.left && rect.left <= composerRect.right) score += 300;
+      if (rect.bottom >= composerRect.top - 40) score += 180;
+      if (rect.left >= composerRect.left - 120) score += 180;
+    }
+    if (text.includes("新しいチャット")) score -= 250;
+
+    scored.push({ candidate, score });
+  }
+
+  return scored
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 3)
+    .map((item) => item.candidate);
+}
+
+function getDmScrollSignature(containers, rowCount) {
+  return containers.map((container) => {
+    const anchors = [...container.querySelectorAll("a[href*='/status/']")]
+      .slice(0, 6)
+      .map((anchor) => normalizeTweetUrl(anchor.href || ""))
+      .filter(Boolean);
+    return `${container.scrollTop}|${container.scrollHeight}|${anchors.join(",")}`;
+  }).join("||") + `||${rowCount}`;
+}
+
+function findDmMessageContainer(node, fallbackRoot) {
+  let current = node instanceof Element ? node : null;
+  let best = null;
+  while (current && current !== fallbackRoot) {
+    const text = (current.innerText || "").trim();
+    if (text && text.length <= 1800 && current.querySelector("a[href*='/status/']")) {
+      best = current;
+      if (hasStandaloneDmTagText(current)) {
+        return current;
+      }
+    }
+    current = current.parentElement;
+  }
+  return best || (fallbackRoot instanceof Element ? fallbackRoot : document.body);
+}
+
+function extractTagsFromText(text) {
+  const tags = new Set();
+  const normalizedText = String(text || "");
+  const matches = normalizedText.matchAll(/#([\p{L}\p{N}_-]+)/gu);
+  for (const match of matches) {
+    const tag = normalizeTag(match[1] || "");
+    if (tag) {
+      tags.add(tag);
+    }
+  }
+
+  const lines = normalizedText
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean);
+
+  for (const line of lines) {
+    if (/https?:\/\//i.test(line)) {
+      continue;
+    }
+    if (!/^[\p{L}\p{N}_-・]+(?:[ \u3000]+[\p{L}\p{N}_-・]+)*$/u.test(line)) {
+      continue;
+    }
+
+    for (const rawTag of line.split(/[ \u3000]+/u)) {
+      const tag = normalizeTag(rawTag);
+      if (tag) {
+        tags.add(tag);
+      }
+    }
+  }
+
+  return [...tags];
+}
+
+function extractTagsFromDmMessage(messageRoot) {
+  if (!(messageRoot instanceof Element)) {
+    return [];
+  }
+
+  const fragments = collectStandaloneDmTextFragments(messageRoot);
+  return extractTagsFromText(fragments.join("\n"));
+}
+
+function hasStandaloneDmTagText(messageRoot) {
+  return collectStandaloneDmTextFragments(messageRoot).length > 0;
+}
+
+function collectStandaloneDmTextFragments(messageRoot) {
+  const fragments = new Set();
+  const candidates = [messageRoot, ...messageRoot.querySelectorAll("div, span")];
+  const rootRect = messageRoot.getBoundingClientRect();
+
+  for (const candidate of candidates) {
+    if (!(candidate instanceof HTMLElement)) {
+      continue;
+    }
+    if (candidate.closest("a")) {
+      continue;
+    }
+    if (candidate !== messageRoot && isInsideLinkedDmSubtree(candidate, messageRoot)) {
+      continue;
+    }
+
+    const rect = candidate.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      continue;
+    }
+    if (rect.width > Math.max(rootRect.width * 0.75, 220)) {
+      continue;
+    }
+    if (rect.top < rootRect.top - 4 || rect.bottom > rootRect.bottom + 4) {
+      continue;
+    }
+
+    const text = normalizeDmMessageText(candidate.innerText || candidate.textContent || "");
+    if (!text || text.length > 120) {
+      continue;
+    }
+    if (!looksLikeStandaloneTagText(text)) {
+      continue;
+    }
+
+    fragments.add(text);
+  }
+
+  return [...fragments];
+}
+
+function isInsideLinkedDmSubtree(node, messageRoot) {
+  let current = node.parentElement;
+  while (current && current !== messageRoot) {
+    if (current.querySelector("a[href*='/status/'], a[href^='http'], a[href^='/']")) {
+      return true;
+    }
+    current = current.parentElement;
+  }
+  return false;
+}
+
+function looksLikeStandaloneTagText(text) {
+  const lines = normalizeDmMessageText(text).split("\n").filter(Boolean);
+  if (lines.length === 0 || lines.length > 3) {
+    return false;
+  }
+
+  return lines.every((line) => {
+    if (isDmNoiseText(line)) {
+      return false;
+    }
+    if (/https?:\/\//i.test(line)) {
+      return false;
+    }
+    if (/#([\p{L}\p{N}_-]+)/u.test(line)) {
+      return true;
+    }
+    return /^[\p{L}\p{N}_-]+(?:[ \u3000]+[\p{L}\p{N}_-]+)*$/u.test(line);
+  });
+}
+
+function isDmNoiseText(text) {
+  const value = normalizeDmMessageText(text);
+  if (!value) {
+    return true;
+  }
+  if (value.includes("エンドツーエンドで暗号化")) {
+    return true;
+  }
+  if (value.includes("この会話が")) {
+    return true;
+  }
+  if (/^\d{1,2}:\d{2}$/.test(value)) {
+    return true;
+  }
+  if (/^\d{4}年\d{1,2}月\d{1,2}日$/.test(value)) {
+    return true;
+  }
+  if (/^\d{1,2}月\d{1,2}日$/.test(value)) {
+    return true;
+  }
+  if (/^[0-9０-９]{1,2}時[0-9０-９]{0,2}分?$/.test(value)) {
+    return true;
+  }
+  if (/^[A-Za-z0-9_.]{1,30}$/.test(value) && !value.includes(" ")) {
+    return true;
+  }
+  if (/^(既読|送信済み|メッセージ|チャット|昨日|今日|明日)$/.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function normalizeTweetUrl(url) {
+  try {
+    const parsed = new URL(url, location.origin);
+    const tweetId = extractTweetId(parsed.href);
+    if (!tweetId) return "";
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    const user = parts[0];
+    if (!user) return "";
+    if (!/^(x\.com|twitter\.com|www\.twitter\.com)$/i.test(parsed.host)) return "";
+    return `https://x.com/${user}/status/${tweetId}`;
+  } catch {
+    return "";
+  }
+}
+
+function buildDmCsv(rows) {
+  const lines = ["url,tags"];
+  for (const row of rows) {
+    lines.push(`${escapeCsv(row.url)},${escapeCsv(row.tags.join("|"))}`);
+  }
+  return lines.join("\r\n");
+}
+
+function normalizeDmMessageText(text) {
+  return String(text || "")
+    .replace(/\r/g, "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .join("\n");
+}
+
+function escapeCsv(value) {
+  const text = String(value ?? "");
+  return `"${text.replace(/"/g, "\"\"")}"`;
+}
+
+function downloadCsv(csvText, fileName) {
+  const blob = new Blob([csvText], { type: "text/csv;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function formatDateForFile(date) {
+  const yyyy = date.getFullYear();
+  const mm = String(date.getMonth() + 1).padStart(2, "0");
+  const dd = String(date.getDate()).padStart(2, "0");
+  const hh = String(date.getHours()).padStart(2, "0");
+  const mi = String(date.getMinutes()).padStart(2, "0");
+  const ss = String(date.getSeconds()).padStart(2, "0");
+  return `${yyyy}${mm}${dd}-${hh}${mi}${ss}`;
+}
+
+function waitMs(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function scanArticles() {
@@ -1172,5 +1641,329 @@ async function copyText(text) {
 
 function escapeHtml(value) {
   return String(value ?? "").replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+function extractTagsFromDmAnchor(anchor) {
+  const parent = anchor.parentElement;
+  if (!(parent instanceof HTMLElement)) {
+    return [];
+  }
+
+  const texts = [];
+  for (const child of parent.children) {
+    if (!(child instanceof HTMLElement)) {
+      continue;
+    }
+    if (child === anchor || child.contains(anchor) || child.querySelector("a[href*='/status/']")) {
+      continue;
+    }
+
+    const text = normalizeDmMessageText(child.innerText || child.textContent || "");
+    if (!text) {
+      continue;
+    }
+    texts.push(stripDmMetaLines(text));
+  }
+
+  return extractTagsFromText(texts.filter(Boolean).join("\n"));
+}
+
+function stripDmMetaLines(text) {
+  return normalizeDmMessageText(text)
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line && !isDmNoiseText(line))
+    .join("\n");
+}
+
+function extractTagsFromDmMessage(messageRoot) {
+  if (!(messageRoot instanceof Element)) {
+    return [];
+  }
+
+  const fragments = collectNearbyDmTagFragments(messageRoot);
+  return extractTagsFromText(fragments.join("\n"));
+}
+
+function collectNearbyDmTagFragments(messageRoot) {
+  const main = document.querySelector("main") || document.body;
+  const rootRect = messageRoot.getBoundingClientRect();
+  const rootCenterX = rootRect.left + (rootRect.width / 2);
+  const fragments = new Set();
+
+  for (const candidate of main.querySelectorAll("div, span")) {
+    if (!(candidate instanceof HTMLElement)) {
+      continue;
+    }
+    if (candidate.closest("a")) {
+      continue;
+    }
+    if (candidate.querySelector("a[href*='/status/'], a[href^='http'], a[href^='/']")) {
+      continue;
+    }
+
+    const rect = candidate.getBoundingClientRect();
+    if (rect.width <= 0 || rect.height <= 0) {
+      continue;
+    }
+
+    const candidateCenterX = rect.left + (rect.width / 2);
+    if (rect.top < rootRect.bottom - 8 || rect.top > rootRect.bottom + 260) {
+      continue;
+    }
+    if (Math.abs(candidateCenterX - rootCenterX) > Math.max(rootRect.width * 0.4, 140)) {
+      continue;
+    }
+    if (rect.width > 260 || rect.height > 120) {
+      continue;
+    }
+
+    const text = normalizeDmMessageText(candidate.innerText || candidate.textContent || "");
+    if (!text || text.length > 80) {
+      continue;
+    }
+    if (!looksLikeStandaloneTagText(text) || isDmNoiseText(text)) {
+      continue;
+    }
+
+    fragments.add(text);
+  }
+
+  return [...fragments];
+}
+
+function looksLikeStandaloneTagText(text) {
+  const lines = normalizeDmMessageText(text).split("\n").filter(Boolean);
+  if (lines.length === 0 || lines.length > 3) {
+    return false;
+  }
+
+  return lines.every((line) => {
+    if (isDmNoiseText(line)) {
+      return false;
+    }
+    if (/https?:\/\//i.test(line)) {
+      return false;
+    }
+    if (/#([\p{L}\p{N}_-]+)/u.test(line)) {
+      return true;
+    }
+    return /^[\p{L}\p{N}_-・]+(?:[ \u3000]+[\p{L}\p{N}_-・]+)*$/u.test(line);
+  });
+}
+
+function isDmNoiseText(text) {
+  const value = normalizeDmMessageText(text);
+  if (!value) {
+    return true;
+  }
+  if (value.includes("エンドツーエンドで暗号化")) {
+    return true;
+  }
+  if (value.includes("この会話が")) {
+    return true;
+  }
+  if (/^\d{1,2}:\d{2}$/.test(value)) {
+    return true;
+  }
+  if (/^\d{4}年\d{1,2}月\d{1,2}日$/.test(value)) {
+    return true;
+  }
+  if (/^\d{1,2}月\d{1,2}日$/.test(value)) {
+    return true;
+  }
+  if (/^[0-9０-９]{1,2}時[0-9０-９]{0,2}分?$/.test(value)) {
+    return true;
+  }
+  if (/^(既読|送信済み|メッセージ|チャット|昨日|今日|明日)$/.test(value)) {
+    return true;
+  }
+  return false;
+}
+
+function syncDmExportButton() {
+  const existing = document.getElementById(DM_EXPORT_BUTTON_ID);
+  if (!isDmPage()) {
+    existing?.closest(".x-post-archive-dm-export-host")?.remove();
+    return;
+  }
+
+  const host = document.body;
+  if (!(host instanceof HTMLElement) || !host.isConnected) {
+    existing?.closest(".x-post-archive-dm-export-host")?.remove();
+    return;
+  }
+
+  if (existing instanceof HTMLButtonElement && host.contains(existing)) {
+    existing.textContent = existing.disabled ? existing.textContent || "Loading..." : "CSV出力";
+    return;
+  }
+
+  existing?.closest(".x-post-archive-dm-export-host")?.remove();
+
+  const wrapper = document.createElement("div");
+  wrapper.className = "x-post-archive-dm-export-host";
+
+  const button = document.createElement("button");
+  button.id = DM_EXPORT_BUTTON_ID;
+  button.type = "button";
+  button.className = "x-post-archive-dm-export";
+  button.textContent = "CSV出力";
+  button.addEventListener("click", async (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    await exportDmLinksAsCsv(button);
+  });
+
+  wrapper.appendChild(button);
+  host.appendChild(wrapper);
+}
+
+async function exportDmLinksAsCsv(button) {
+  const originalLabel = button.textContent;
+  try {
+    button.disabled = true;
+    button.textContent = "Loading...";
+    const rows = await collectAllDmCsvRows(button);
+    if (rows.length === 0) {
+      await showResultDialog(
+        "URL が見つかりませんでした",
+        "この DM 会話から X の投稿 URL を抽出できませんでした。会話を少し上まで読み込んでから再度お試しください。",
+        true
+      );
+      return;
+    }
+
+    downloadCsv(buildDmCsv(rows), `x-post-archive-dm-${formatDateForFile(new Date())}.csv`);
+    showSuccessToast("CSV を出力しました", `URL: ${rows.length}件\nこの会話で読み込めた範囲から抽出しました。`);
+  } catch (error) {
+    await showResultDialog("CSV 出力に失敗しました", `Unhandled Error\n\n${String(error)}\n\n${error?.stack || ""}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel || "CSV出力";
+  }
+}
+
+async function collectAllDmCsvRows(button) {
+  const rowsByUrl = new Map();
+  const scrollContainers = findDmConversationScrollContainers();
+  collectDmCsvRowsInto(rowsByUrl);
+
+  if (scrollContainers.length === 0) {
+    return rowsFromMap(rowsByUrl);
+  }
+
+  let stagnantCount = 0;
+  let previousUrlCount = rowsByUrl.size;
+  let previousMaxScrollHeight = Math.max(...scrollContainers.map((item) => item.scrollHeight), 0);
+
+  for (let index = 0; index < 160; index += 1) {
+    if (button?.isConnected) {
+      button.textContent = `Loading... ${rowsByUrl.size}`;
+    }
+
+    let moved = false;
+
+    for (const scrollContainer of scrollContainers) {
+      const beforeTop = scrollContainer.scrollTop;
+      const step = Math.max(Math.floor(scrollContainer.clientHeight * 0.9), 360);
+      const maxTop = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+
+      scrollContainer.scrollTop = Math.max(0, beforeTop - step);
+      if (Math.abs(scrollContainer.scrollTop - beforeTop) < 2) {
+        scrollContainer.scrollTop = Math.min(maxTop, beforeTop + step);
+      }
+      if (Math.abs(scrollContainer.scrollTop - beforeTop) < 2 && maxTop > 0) {
+        scrollContainer.scrollTop = maxTop;
+      }
+
+      if (Math.abs(scrollContainer.scrollTop - beforeTop) >= 2) {
+        moved = true;
+      }
+
+      scrollContainer.dispatchEvent(new Event("scroll", { bubbles: true }));
+      scrollContainer.dispatchEvent(new WheelEvent("wheel", { deltaY: -step, bubbles: true, cancelable: true }));
+    }
+
+    await waitMs(1400);
+    collectDmCsvRowsInto(rowsByUrl);
+
+    const currentUrlCount = rowsByUrl.size;
+    const currentMaxScrollHeight = Math.max(...scrollContainers.map((item) => item.scrollHeight), 0);
+    const noUrlGrowth = currentUrlCount === previousUrlCount;
+    const noHeightGrowth = currentMaxScrollHeight === previousMaxScrollHeight;
+
+    if ((noUrlGrowth && noHeightGrowth) || !moved) {
+      stagnantCount += 1;
+    } else {
+      stagnantCount = 0;
+    }
+
+    previousUrlCount = currentUrlCount;
+    previousMaxScrollHeight = currentMaxScrollHeight;
+
+    if (stagnantCount >= 5) {
+      break;
+    }
+  }
+
+  return rowsFromMap(rowsByUrl);
+}
+
+function findDmConversationScrollContainers() {
+  const main = document.querySelector("main");
+  if (!(main instanceof HTMLElement)) {
+    return [];
+  }
+
+  const composer = main.querySelector("div[data-testid='dmComposerTextInput'], [data-testid='dmComposerTextInput'], textarea");
+  const composerRect = composer instanceof HTMLElement ? composer.getBoundingClientRect() : null;
+  const candidates = [main, ...main.querySelectorAll("div, section")];
+  const scored = [];
+
+  for (const candidate of candidates) {
+    if (!(candidate instanceof HTMLElement)) {
+      continue;
+    }
+
+    const style = getComputedStyle(candidate);
+    if (!/(auto|scroll)/.test(style.overflowY || "")) {
+      continue;
+    }
+
+    if (candidate.scrollHeight <= candidate.clientHeight + 80 || candidate.clientHeight < 180) {
+      continue;
+    }
+
+    const rect = candidate.getBoundingClientRect();
+    if (rect.width < 260 || rect.height < 240) {
+      continue;
+    }
+
+    const text = candidate.innerText || "";
+    const anchorCount = candidate.querySelectorAll("a[href*='/status/']").length;
+    let score = candidate.scrollHeight - candidate.clientHeight;
+    score += Math.min(anchorCount, 20) * 180;
+
+    if (text.includes("メッセージ")) score += 200;
+    if (text.includes("You sent a video")) score += 120;
+    if (rect.left > window.innerWidth * 0.2) score += 150;
+    if (rect.width > window.innerWidth * 0.4) score += 150;
+
+    if (composerRect) {
+      if (rect.right >= composerRect.left && rect.left <= composerRect.right) score += 300;
+      if (rect.bottom >= composerRect.top - 40) score += 180;
+      if (rect.left >= composerRect.left - 120) score += 180;
+    }
+
+    if (text.includes("新しいチャット")) score -= 250;
+
+    scored.push({ candidate, score });
+  }
+
+  return scored
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 3)
+    .map((item) => item.candidate);
 }
 
